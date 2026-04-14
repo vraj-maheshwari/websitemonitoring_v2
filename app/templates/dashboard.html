@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard | Website Monitor{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <div class="hero-copy panel">
+        <span class="eyebrow">Monitoring command center</span>
+        <h1>Professional visibility into uptime, SSL health, and on-page SEO.</h1>
+        <p>Track every monitored property from one place, trigger checks on demand, and spot risk before it becomes downtime.</p>
+        <div class="hero-inline-stats">
+            <div>
+                <strong>{{ metrics.monitored_sites }}</strong>
+                <span>Monitored sites</span>
+            </div>
+            <div>
+                <strong>{{ metrics.health_score }}%</strong>
+                <span>Fleet health</span>
+            </div>
+            <div>
+                <strong>{% if metrics.avg_response is not none %}{{ '%.2f'|format(metrics.avg_response) }}s{% else %}--{% endif %}</strong>
+                <span>Average response</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="hero-form panel panel-accent">
+        <div class="section-heading">
+            <span>Add website</span>
+            <h2>Start monitoring a new property</h2>
+        </div>
+        <form method="post" action="{{ url_for('web.create_site') }}" class="site-form">
+            <label>
+                Site name
+                <input type="text" name="name" placeholder="Marketing Site">
+            </label>
+            <label>
+                Website URL
+                <input type="text" name="url" placeholder="https://example.com" required>
+            </label>
+            <label>
+                Check interval
+                <select name="check_interval">
+                    <option value="60">Every 60 seconds</option>
+                    <option value="120">Every 2 minutes</option>
+                    <option value="300">Every 5 minutes</option>
+                    <option value="600">Every 10 minutes</option>
+                </select>
+            </label>
+            <label>
+                Notification emails
+                <input type="text" name="notification_emails" placeholder="ops@example.com, dev@example.com">
+            </label>
+            <button type="submit" class="button button-primary">Add to dashboard</button>
+        </form>
+    </div>
+</section>
+
+<section class="metrics-grid">
+    <article class="metric-card panel">
+        <span class="metric-label">Healthy sites</span>
+        <strong>{{ metrics.sites_up }}</strong>
+        <p>Websites currently reporting successful uptime results.</p>
+    </article>
+    <article class="metric-card panel">
+        <span class="metric-label">Attention needed</span>
+        <strong>{{ metrics.sites_down }}</strong>
+        <p>Sites with a latest uptime check indicating a failure or outage.</p>
+    </article>
+    <article class="metric-card panel">
+        <span class="metric-label">Average latency</span>
+        <strong>{% if metrics.avg_response is not none %}{{ '%.2f'|format(metrics.avg_response) }}s{% else %}--{% endif %}</strong>
+        <p>Calculated from stored uptime measurements across the environment.</p>
+    </article>
+    <article class="metric-card panel">
+        <span class="metric-label">Coverage score</span>
+        <strong>{{ metrics.health_score }}%</strong>
+        <p>A simple operational score based on how many monitored sites are up.</p>
+    </article>
+</section>
+
+<section class="dashboard-grid">
+    <div class="panel">
+        <div class="section-heading">
+            <span>Portfolio status</span>
+            <h2>Monitored websites</h2>
+        </div>
+
+        {% if site_cards %}
+            <div class="site-card-grid">
+                {% for site in site_cards %}
+                    <article class="site-card status-{{ site.current_status|lower }}">
+                        <div class="site-card-top">
+                            <div>
+                                <div class="status-badge tone-{{ site.current_status|lower if site.current_status else 'idle' }}">{{ site.current_status or 'PENDING' }}</div>
+                                <h3>{{ site.display_name() }}</h3>
+                                <p class="muted">{{ site.url }}</p>
+                            </div>
+                            <a class="text-link" href="{{ url_for('web.site_detail', site_id=site.id) }}">Open</a>
+                        </div>
+                        <div class="site-metrics">
+                            <div>
+                                <span>Status code</span>
+                                <strong>{{ site.last_status_code or '--' }}</strong>
+                            </div>
+                            <div>
+                                <span>SSL</span>
+                                <strong class="tone-{{ site.ssl_status|lower if site.ssl_status else 'idle' }}">
+                                    {% if site.ssl_days_remaining is not none %}
+                                        {{ site.ssl_days_remaining }}d left
+                                    {% else %}
+                                        {{ site.ssl_status }}
+                                    {% endif %}
+                                </strong>
+                            </div>
+                            <div>
+                                <span>SEO</span>
+                                <strong>{{ site.seo_score }}/100</strong>
+                            </div>
+                        </div>
+                        <div class="site-card-footer">
+                            <span>Interval: every {{ site.check_interval }}s</span>
+                            <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='all') }}">
+                                <input type="hidden" name="next" value="{{ url_for('web.dashboard') }}">
+                                <button type="submit" class="button button-secondary">Run all checks</button>
+                            </form>
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="empty-state">
+                <h3>No websites added yet</h3>
+                <p>Add your first website to activate uptime tracking, SSL checks, and SEO visibility.</p>
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="activity-stack">
+        <section class="panel">
+            <div class="section-heading">
+                <span>Live feed</span>
+                <h2>Recent uptime activity</h2>
+            </div>
+            <div class="log-list">
+                {% for log in recent_uptime_logs %}
+                    <article class="log-row">
+                        <div class="status-dot tone-{{ 'up' if log.is_up else 'down' }}"></div>
+                        <div>
+                            <strong>{{ log.site.url }}</strong>
+                            <p>
+                                {% if log.is_up %}
+                                    Status {{ log.status_code }} in {{ '%.2f'|format(log.response_time or 0) }}s
+                                {% else %}
+                                    {{ log.error_message or 'Website unavailable' }}
+                                {% endif %}
+                            </p>
+                        </div>
+                        <time>{{ log.checked_at.strftime('%d %b %H:%M') }}</time>
+                    </article>
+                {% else %}
+                    <p class="muted">No uptime checks recorded yet.</p>
+                {% endfor %}
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="section-heading">
+                <span>Certificate watch</span>
+                <h2>Recent SSL results</h2>
+            </div>
+            <div class="log-list compact-list">
+                {% for log in recent_ssl_logs %}
+                    <article class="log-row">
+                        <div class="status-dot tone-{{ 'up' if log.is_valid else 'down' }}"></div>
+                        <div>
+                            <strong>{{ log.site.url }}</strong>
+                            <p>
+                                {% if log.is_valid %}
+                                    {% if log.days_remaining is not none %}{{ log.days_remaining }} days remaining{% else %}Valid certificate{% endif %}
+                                {% else %}
+                                    {{ log.error_message or 'SSL validation failed' }}
+                                {% endif %}
+                            </p>
+                        </div>
+                    </article>
+                {% else %}
+                    <p class="muted">No SSL checks recorded yet.</p>
+                {% endfor %}
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="section-heading">
+                <span>Content audit</span>
+                <h2>Recent SEO results</h2>
+            </div>
+            <div class="log-list compact-list">
+                {% for log in recent_seo_logs %}
+                    <article class="log-row">
+                        <div class="status-dot tone-{{ 'up' if (log.title and log.has_meta and log.has_h1) else 'warn' }}"></div>
+                        <div>
+                            <strong>{{ log.site.url }}</strong>
+                            <p>
+                                Title: {{ 'Yes' if log.title else 'No' }},
+                                Meta: {{ 'Yes' if log.has_meta else 'No' }},
+                                H1: {{ 'Yes' if log.has_h1 else 'No' }}
+                            </p>
+                        </div>
+                    </article>
+                {% else %}
+                    <p class="muted">No SEO audits recorded yet.</p>
+                {% endfor %}
+            </div>
+        </section>
+    </div>
+</section>
+{% endblock %}

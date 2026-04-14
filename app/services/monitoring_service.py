@@ -1,0 +1,90 @@
+import logging
+from datetime import datetime, timedelta
+
+from app.config.settings import Config
+from app.extensions import db
+from app.models.site import Site
+from app.utils.urls import normalize_url
+
+logger = logging.getLogger(__name__)
+
+CHECK_UPTIME = "uptime"
+CHECK_SSL = "ssl"
+CHECK_SEO = "seo"
+
+STATUS_PENDING = "PENDING"
+STATUS_UP = "UP"
+STATUS_DOWN = "DOWN"
+STATUS_DEGRADED = "DEGRADED"
+
+
+def prepare_site(site: Site) -> Site:
+    canonical_url, normalized_url = normalize_url(site.url)
+    site.url = canonical_url
+    site.normalized_url = normalized_url
+    if not site.name:
+        site.name = canonical_url.split("//", 1)[-1]
+
+    now = datetime.utcnow()
+    if site.next_uptime_check_at is None:
+        site.next_uptime_check_at = now
+    if site.next_ssl_check_at is None:
+        site.next_ssl_check_at = now
+    if site.next_seo_check_at is None:
+        site.next_seo_check_at = now
+    refresh_next_check_at(site)
+    return site
+
+
+def refresh_next_check_at(site: Site) -> None:
+    upcoming = [
+        site.next_uptime_check_at,
+        site.next_ssl_check_at,
+        site.next_seo_check_at,
+    ]
+    upcoming = [dt for dt in upcoming if dt is not None]
+    site.next_check_at = min(upcoming) if upcoming else None
+
+
+def get_interval_seconds(site: Site, check_type: str) -> int:
+    if check_type == CHECK_SSL:
+        return max(site.check_interval, Config.SSL_CHECK_INTERVAL_SECONDS)
+    if check_type == CHECK_SEO:
+        return max(site.check_interval, Config.SEO_CHECK_INTERVAL_SECONDS)
+    return site.check_interval
+
+
+def schedule_next_run(site: Site, check_type: str, checked_at: datetime) -> None:
+    next_run = checked_at + timedelta(seconds=get_interval_seconds(site, check_type))
+    if check_type == CHECK_UPTIME:
+        site.last_uptime_check_at = checked_at
+        site.next_uptime_check_at = next_run
+    elif check_type == CHECK_SSL:
+        site.last_ssl_check_at = checked_at
+        site.next_ssl_check_at = next_run
+    elif check_type == CHECK_SEO:
+        site.last_seo_check_at = checked_at
+        site.next_seo_check_at = next_run
+
+    refresh_next_check_at(site)
+
+
+def get_due_site_ids(check_type: str, now: datetime | None = None, limit: int = 100) -> list[int]:
+    now = now or datetime.utcnow()
+    field = _get_due_field(check_type)
+    query = (
+        Site.query
+        .filter(field.isnot(None))
+        .filter(field <= now)
+        .order_by(field.asc())
+        .limit(limit)
+    )
+    return [site.id for site in query.all()]
+
+
+def _get_due_field(check_type: str):
+    if check_type == CHECK_SSL:
+        return Site.next_ssl_check_at
+    if check_type == CHECK_SEO:
+        return Site.next_seo_check_at
+    return Site.next_uptime_check_at
