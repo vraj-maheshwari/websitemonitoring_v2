@@ -8,6 +8,33 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+    <style>
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(255,255,255,0.1);
+            border-top: 2px solid var(--accent-primary, #6366f1);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        .checking-overlay {
+            position: relative;
+            opacity: 0.7;
+            pointer-events: none;
+        }
+        .checking-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.85rem;
+            color: var(--accent-primary, #6366f1);
+            font-weight: 600;
+        }
+    </style>
 </head>
 <body>
     <div class="page-shell">
@@ -40,5 +67,6 @@
             {% block content %}{% endblock %}
         </main>
     </div>
+    {% block scripts %}{% endblock %}
 </body>
 </html>

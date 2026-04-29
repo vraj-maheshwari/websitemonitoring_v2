@@ -271,6 +271,11 @@ select {
 .button-secondary {
     background: rgba(6, 14, 28, 0.8);
     color: var(--text);
+    border: 1px solid var(--line);
+}
+
+.button-secondary:hover {
+    background: rgba(10, 20, 37, 0.9);
 }
 
 .metrics-grid {

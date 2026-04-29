@@ -1,6 +1,6 @@
 from datetime import datetime
-
 from app.extensions import db
+from app.utils.time import now_utc
 
 
 class Incident(db.Model):
@@ -13,8 +13,8 @@ class Incident(db.Model):
     site_id = db.Column(db.Integer, db.ForeignKey("sites.id", ondelete="CASCADE"),
                         nullable=False, index=True)
     status = db.Column(db.String(32), nullable=False, default="OPEN")
-    opened_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    resolved_at = db.Column(db.DateTime, nullable=True)
+    opened_at = db.Column(db.DateTime(timezone=True), default=now_utc, nullable=False)
+    resolved_at = db.Column(db.DateTime(timezone=True), nullable=True)
     opened_status_code = db.Column(db.Integer, nullable=True)
     opened_response_time = db.Column(db.Float, nullable=True)
     opened_error_message = db.Column(db.Text, nullable=True)

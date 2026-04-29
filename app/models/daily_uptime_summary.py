@@ -13,8 +13,12 @@ class DailyUptimeSummary(db.Model):
     summary_date = db.Column(db.Date, nullable=False, index=True)
     uptime_percentage = db.Column(db.Float, nullable=False, default=0.0)
     avg_response_time = db.Column(db.Float, nullable=True)
+    avg_ttfb = db.Column(db.Float, nullable=True)
     outage_count = db.Column(db.Integer, nullable=False, default=0)
     total_checks = db.Column(db.Integer, nullable=False, default=0)
+    up_checks = db.Column(db.Integer, nullable=False, default=0)
+    down_checks = db.Column(db.Integer, nullable=False, default=0)
+    degraded_checks = db.Column(db.Integer, nullable=False, default=0)
 
     def to_dict(self) -> dict:
         return {
@@ -23,6 +27,10 @@ class DailyUptimeSummary(db.Model):
             "summary_date": self.summary_date.isoformat(),
             "uptime_percentage": self.uptime_percentage,
             "avg_response_time": self.avg_response_time,
+            "avg_ttfb": self.avg_ttfb,
             "outage_count": self.outage_count,
             "total_checks": self.total_checks,
+            "up_checks": self.up_checks,
+            "down_checks": self.down_checks,
+            "degraded_checks": self.degraded_checks,
         }

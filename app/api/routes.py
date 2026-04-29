@@ -1,24 +1,68 @@
 from collections import Counter
 from statistics import mean
 
-from flask import Blueprint, abort, flash, jsonify, redirect, render_template, request, url_for
+from datetime import timedelta
+
+import json
+import logging
+from io import BytesIO
+
+from flask import Blueprint, abort, flash, jsonify, redirect, render_template, request, session, url_for, send_file
 from sqlalchemy.exc import IntegrityError
 
 from app.extensions import db
+from app.models.daily_uptime_summary import DailyUptimeSummary
 from app.models.seo_log import SEOLog
 from app.models.site import Site
 from app.models.site_notification import SiteNotification
 from app.models.ssl_log import SSLLog
 from app.models.uptime_log import UptimeLog
+from app.models.user import User
 from app.services.monitor_service import run_uptime_check
 from app.services.monitoring_service import prepare_site
+from app.services.report_service import generate_site_report
 from app.services.seo_service import run_seo_check
 from app.services.ssl_service import run_ssl_check
+from app.utils.time import normalize, now_utc
 from app.utils.urls import normalize_url
-from app.workers.runtime_tasks import run_seo_check_task, run_ssl_check_task, run_uptime_check_task
+from app.workers.tasks import run_seo_check_task, run_ssl_check_task, run_uptime_check_task
 
 api_bp = Blueprint("api", __name__)
 web_bp = Blueprint("web", __name__)
+logger = logging.getLogger(__name__)
+
+
+@api_bp.route("/auth/register", methods=["POST"])
+def register():
+    data = request.get_json() or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email or not password:
+        return jsonify({"error": "email and password are required"}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "User already exists"}), 409
+    user = User(email=email)
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+    session["user_id"] = user.id
+    return jsonify({"message": "Registered", "user": user.to_dict()}), 201
+
+
+@api_bp.route("/auth/login", methods=["POST"])
+def login():
+    data = request.get_json() or {}
+    user = User.query.filter_by(email=(data.get("email") or "").strip().lower()).first()
+    if user is None or not user.check_password(data.get("password") or ""):
+        return jsonify({"error": "Invalid credentials"}), 401
+    session["user_id"] = user.id
+    return jsonify({"message": "Logged in", "user": user.to_dict()})
+
+
+@api_bp.route("/auth/logout", methods=["POST"])
+def logout():
+    session.pop("user_id", None)
+    return jsonify({"message": "Logged out"})
 
 # ➕ Add site
 @api_bp.route("/sites", methods=["POST"])
@@ -27,8 +71,14 @@ def add_site():
 
     url = data.get("url")
     name = (data.get("name") or "").strip() or None
-    interval = data.get("check_interval", 60)
-    emails = data.get("emails") or []
+    try:
+        interval = _parse_interval(data.get("check_interval", 60), default=60, minimum=30)
+        uptime_interval = _parse_interval(data.get("uptime_check_interval", interval), default=interval, minimum=30)
+        ssl_interval = _parse_interval(data.get("ssl_check_interval", 86400), default=86400, minimum=3600)
+        seo_interval = _parse_interval(data.get("seo_check_interval", 604800), default=604800, minimum=3600)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    emails = data.get("notification_emails") or data.get("emails") or []
 
     if not url:
         return jsonify({"error": "URL required"}), 400
@@ -38,7 +88,16 @@ def add_site():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    site = Site(name=name, url=canonical_url, normalized_url=normalized_url, check_interval=interval)
+    site = Site(
+        name=name,
+        url=canonical_url,
+        normalized_url=normalized_url,
+        user_id=_effective_user_id(),
+        check_interval=interval,
+        uptime_check_interval=uptime_interval,
+        ssl_check_interval=ssl_interval,
+        seo_check_interval=seo_interval,
+    )
     prepare_site(site)
     db.session.add(site)
     try:
@@ -51,40 +110,133 @@ def add_site():
         recipient = (email or "").strip()
         if recipient:
             db.session.add(SiteNotification(site_id=site.id, email=recipient, is_active=True))
+    
+    # SaaS State Initialization
+    site.app_status = "checking"
+    site.uptime_status = "pending"
+    site.ssl_status = "pending"
+    site.seo_status = "pending"
     db.session.commit()
+    
+    dispatch = {
+        "uptime": _safe_delay(run_uptime_check_task, site.id),
+        "ssl": _safe_delay(run_ssl_check_task, site.id),
+        "seo": _safe_delay(run_seo_check_task, site.id),
+    }
 
-    return jsonify({"message": "Site added", "id": site.id})
+    return jsonify({"message": "Site added", "id": site.id, "dispatch": dispatch}), 201
 
 
 # 📃 List sites
 @api_bp.route("/sites", methods=["GET"])
 def list_sites():
-    sites = Site.query.order_by(Site.created_at.desc()).all()
+    query = _owned_sites_query()
+    since = request.args.get("since")
+    if since:
+        try:
+            since_dt = normalize(_parse_iso8601(since))
+            query = query.filter(Site.updated_at > since_dt)
+        except ValueError:
+            return jsonify({"error": "Invalid since datetime"}), 400
+    sites = query.order_by(Site.updated_at.desc()).all()
     return jsonify([site.to_dict() for site in sites])
+
+
+@api_bp.route("/sites/<int:site_id>", methods=["GET"])
+def get_site(site_id):
+    site = _get_owned_site_or_404(site_id)
+    latest_uptime = UptimeLog.query.filter_by(site_id=site.id).order_by(UptimeLog.checked_at.desc()).first()
+    latest_ssl = SSLLog.query.filter_by(site_id=site.id).order_by(SSLLog.checked_at.desc()).first()
+    latest_seo = SEOLog.query.filter_by(site_id=site.id).order_by(SEOLog.checked_at.desc()).first()
+    payload = site.to_dict()
+    payload.update({
+        "latest_uptime": latest_uptime.to_dict() if latest_uptime else None,
+        "latest_ssl": latest_ssl.to_dict() if latest_ssl else None,
+        "latest_seo": latest_seo.to_dict() if latest_seo else None,
+    })
+    return jsonify(payload)
+
+
+@api_bp.route("/sites/<int:site_id>", methods=["DELETE"])
+def delete_site(site_id):
+    site = _get_owned_site_or_404(site_id)
+    db.session.delete(site)
+    db.session.commit()
+    return jsonify({"message": "Site deleted"})
+
+
+@api_bp.route("/sites/<int:site_id>/check", methods=["POST"])
+def run_all_checks(site_id):
+    site = _get_owned_site_or_404(site_id)
+    statuses = {}
+    for check_type, task in (("uptime", run_uptime_check_task), ("ssl", run_ssl_check_task), ("seo", run_seo_check_task)):
+        if getattr(site, f"{check_type}_status") == "running":
+            statuses[check_type] = "skipped (already running)"
+        else:
+            statuses[check_type] = _safe_delay(task, site.id)
+    return jsonify(statuses)
+
+
+@api_bp.route("/sites/<int:site_id>/history/uptime", methods=["GET"])
+def uptime_history(site_id):
+    site = _get_owned_site_or_404(site_id)
+    days = request.args.get("days", 7, type=int)
+    cutoff = now_utc() - timedelta(days=max(days, 1))
+    logs = UptimeLog.query.filter(UptimeLog.site_id == site.id, UptimeLog.checked_at >= cutoff).order_by(UptimeLog.checked_at.desc()).limit(500).all()
+    return jsonify([log.to_dict() for log in logs])
+
+
+@api_bp.route("/sites/<int:site_id>/history/ssl", methods=["GET"])
+def ssl_history(site_id):
+    site = _get_owned_site_or_404(site_id)
+    limit = request.args.get("limit", 10, type=int)
+    logs = SSLLog.query.filter_by(site_id=site.id).order_by(SSLLog.checked_at.desc()).limit(min(limit, 100)).all()
+    return jsonify([log.to_dict() for log in logs])
+
+
+@api_bp.route("/sites/<int:site_id>/history/seo", methods=["GET"])
+def seo_history(site_id):
+    site = _get_owned_site_or_404(site_id)
+    limit = request.args.get("limit", 5, type=int)
+    logs = SEOLog.query.filter_by(site_id=site.id).order_by(SEOLog.checked_at.desc()).limit(min(limit, 100)).all()
+    return jsonify([log.to_dict() for log in logs])
+
+
+@api_bp.route("/sites/<int:site_id>/uptime-summary", methods=["GET"])
+def uptime_summary(site_id):
+    site = _get_owned_site_or_404(site_id)
+    days = request.args.get("days", 30, type=int)
+    cutoff = (now_utc() - timedelta(days=max(days, 1))).date()
+    rows = DailyUptimeSummary.query.filter(DailyUptimeSummary.site_id == site.id, DailyUptimeSummary.summary_date >= cutoff).order_by(DailyUptimeSummary.summary_date.asc()).all()
+    return jsonify([row.to_dict() for row in rows])
 
 
 # ▶️ Trigger check manually
 @api_bp.route("/check/<int:site_id>", methods=["GET"])
 def check_site(site_id):
-    task = run_uptime_check_task.delay(site_id)
-    return jsonify({"message": "Uptime check started", "task_id": task.id})
+    site = _get_owned_site_or_404(site_id)
+    result = _safe_delay(run_uptime_check_task, site.id)
+    return jsonify({"message": "Uptime check requested", "dispatch": result}), 202 if result["status"] == "queued" else 503
 
 
 @api_bp.route("/check-seo/<int:site_id>", methods=["GET"])
 def check_site_seo(site_id):
-    task = run_seo_check_task.delay(site_id)
-    return jsonify({"message": "SEO check started", "task_id": task.id})
+    site = _get_owned_site_or_404(site_id)
+    result = _safe_delay(run_seo_check_task, site.id)
+    return jsonify({"message": "SEO check requested", "dispatch": result}), 202 if result["status"] == "queued" else 503
 
 
 @api_bp.route("/check-ssl/<int:site_id>", methods=["GET"])
 def check_site_ssl(site_id):
-    task = run_ssl_check_task.delay(site_id)
-    return jsonify({"message": "SSL check started", "task_id": task.id})
+    site = _get_owned_site_or_404(site_id)
+    result = _safe_delay(run_ssl_check_task, site.id)
+    return jsonify({"message": "SSL check requested", "dispatch": result}), 202 if result["status"] == "queued" else 503
 
 
 @api_bp.route("/logs/<int:site_id>", methods=["GET"])
 def get_logs(site_id):
-    logs = UptimeLog.query.filter_by(site_id=site_id)\
+    site = _get_owned_site_or_404(site_id)
+    logs = UptimeLog.query.filter_by(site_id=site.id)\
         .order_by(UptimeLog.id.desc())\
         .limit(10)\
         .all()
@@ -94,8 +246,9 @@ def get_logs(site_id):
 
 @api_bp.route("/seo-logs/<int:site_id>", methods=["GET"])
 def get_seo_logs(site_id):
+    site = _get_owned_site_or_404(site_id)
     logs = (
-        SEOLog.query.filter_by(site_id=site_id)
+        SEOLog.query.filter_by(site_id=site.id)
         .order_by(SEOLog.checked_at.desc())
         .limit(10)
         .all()
@@ -103,12 +256,25 @@ def get_seo_logs(site_id):
     return jsonify([log.to_dict() for log in logs])
 
 
+@api_bp.route("/site/<int:site_id>/status", methods=["GET"])
+def get_site_status(site_id):
+    site = _get_owned_site_or_404(site_id)
+    
+    # SaaS: If logs exist but status is stuck, force ready (Truth logic)
+    if site.app_status == "pending" and site.last_uptime_check_at:
+        site.refresh_app_status()
+        db.session.commit()
+
+    return jsonify(site.to_dict())
+
+
 @web_bp.route("/", methods=["GET"])
 def dashboard():
-    sites = Site.query.order_by(Site.created_at.desc()).all()
-    recent_uptime_logs = UptimeLog.query.order_by(UptimeLog.checked_at.desc()).limit(12).all()
-    recent_ssl_logs = SSLLog.query.order_by(SSLLog.checked_at.desc()).limit(8).all()
-    recent_seo_logs = SEOLog.query.order_by(SEOLog.checked_at.desc()).limit(8).all()
+    sites = _owned_sites_query().order_by(Site.created_at.desc()).all()
+    site_ids = [site.id for site in sites]
+    recent_uptime_logs = UptimeLog.query.filter(UptimeLog.site_id.in_(site_ids)).order_by(UptimeLog.checked_at.desc()).limit(12).all() if site_ids else []
+    recent_ssl_logs = SSLLog.query.filter(SSLLog.site_id.in_(site_ids)).order_by(SSLLog.checked_at.desc()).limit(8).all() if site_ids else []
+    recent_seo_logs = SEOLog.query.filter(SEOLog.site_id.in_(site_ids)).order_by(SEOLog.checked_at.desc()).limit(8).all() if site_ids else []
     response_samples = [site.last_response_time for site in sites if site.last_response_time is not None]
 
     return render_template(
@@ -123,9 +289,7 @@ def dashboard():
 
 @web_bp.route("/site/<int:site_id>", methods=["GET"])
 def site_detail(site_id):
-    site = db.session.get(Site, site_id)
-    if site is None:
-        abort(404)
+    site = _get_owned_site_or_404(site_id)
 
     uptime_logs = (
         UptimeLog.query.filter_by(site_id=site_id)
@@ -149,11 +313,34 @@ def site_detail(site_id):
     return render_template(
         "site_detail.html",
         site=site,
-        summary=site,
         uptime_logs=uptime_logs,
         ssl_logs=ssl_logs,
         seo_logs=seo_logs,
         uptime_breakdown=Counter("Up" if log.is_up else "Down" for log in uptime_logs),
+    )
+
+
+@web_bp.route("/site/<int:site_id>/download-report", methods=["GET"])
+def download_report(site_id):
+    """Download site monitoring report as JSON."""
+    site = _get_owned_site_or_404(site_id)
+    
+    report = generate_site_report(site_id)
+    if not report:
+        flash("Report could not be generated.", "error")
+        return redirect(url_for("web.site_detail", site_id=site_id))
+    
+    # Create JSON file
+    report_json = json.dumps(report, indent=2, default=str)
+    report_bytes = BytesIO(report_json.encode('utf-8'))
+    
+    filename = f"site_report_{site.id}_{site.display_name().replace(' ', '_').replace('/', '_')}.json"
+    
+    return send_file(
+        report_bytes,
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=filename
     )
 
 
@@ -174,7 +361,14 @@ def create_site():
         flash(str(exc), "error")
         return redirect(url_for("web.dashboard"))
 
-    site = Site(name=name, url=canonical_url, normalized_url=normalized_url, check_interval=max(interval, 30))
+    site = Site(
+        name=name,
+        url=canonical_url,
+        normalized_url=normalized_url,
+        user_id=_effective_user_id(),
+        check_interval=max(interval, 30),
+        uptime_check_interval=max(interval, 30),
+    )
     prepare_site(site)
     db.session.add(site)
     try:
@@ -186,32 +380,45 @@ def create_site():
 
     for recipient in _parse_notification_emails(emails_raw):
         db.session.add(SiteNotification(site_id=site.id, email=recipient, is_active=True))
+    
+    # SaaS Initialization
+    site.app_status = "checking"
+    site.uptime_status = "pending"
+    site.ssl_status = "pending"
+    site.seo_status = "pending"
     db.session.commit()
+ 
+    dispatch = [
+        _safe_delay(run_uptime_check_task, site.id),
+        _safe_delay(run_ssl_check_task, site.id),
+        _safe_delay(run_seo_check_task, site.id),
+    ]
 
-    flash("Website added to the monitoring dashboard.", "success")
+    if all(item["status"] == "queued" for item in dispatch):
+        flash("Website added and SaaS analysis started.", "success")
+    else:
+        flash("Website added, but background checks could not be queued. Start Redis/Celery and run checks manually.", "error")
     return redirect(url_for("web.site_detail", site_id=site.id))
 
 
 @web_bp.route("/site/<int:site_id>/run/<check_type>", methods=["POST"])
 def run_check(site_id, check_type):
-    site = db.session.get(Site, site_id)
-    if site is None:
-        abort(404)
+    site = _get_owned_site_or_404(site_id)
 
     if check_type == "uptime":
-        run_uptime_check_task.delay(site_id)
+        _safe_delay(run_uptime_check_task, site_id)
         message = f"Uptime check queued for {site.url}."
     elif check_type == "ssl":
-        run_ssl_check_task.delay(site_id)
+        _safe_delay(run_ssl_check_task, site_id)
         message = f"SSL certificate check queued for {site.url}."
     elif check_type == "seo":
-        run_seo_check_task.delay(site_id)
+        _safe_delay(run_seo_check_task, site_id)
         message = f"SEO audit queued for {site.url}."
     elif check_type == "all":
-        run_uptime_check_task.delay(site_id)
-        run_ssl_check_task.delay(site_id)
-        run_seo_check_task.delay(site_id)
-        message = f"Full monitoring suite queued for {site.url}."
+        _safe_delay(run_uptime_check_task, site_id)
+        _safe_delay(run_ssl_check_task, site_id)
+        _safe_delay(run_seo_check_task, site_id)
+        message = f"Full SaaS monitoring suite queued for {site.url}."
     else:
         abort(404)
 
@@ -243,3 +450,58 @@ def _parse_notification_emails(raw_value: str) -> list[str]:
         if email:
             emails.append(email)
     return emails
+
+
+def _owned_sites_query():
+    query = Site.query
+    return query.filter(Site.user_id == _effective_user_id())
+
+
+def _get_owned_site_or_404(site_id: int) -> Site:
+    site = _owned_sites_query().filter(Site.id == site_id).first()
+    if site is None:
+        abort(404)
+    return site
+
+
+def _parse_iso8601(value: str):
+    from datetime import datetime
+
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _effective_user_id() -> int:
+    user_id = session.get("user_id")
+    if user_id:
+        return int(user_id)
+    return _local_user_id()
+
+
+def _local_user_id() -> int:
+    user = User.query.filter_by(email="local@website-monitor.internal").first()
+    if user is None:
+        user = User(email="local@website-monitor.internal", password_hash="local-development-user")
+        db.session.add(user)
+        db.session.commit()
+    return user.id
+
+
+def _parse_interval(value, default: int, minimum: int) -> int:
+    if value in (None, ""):
+        value = default
+    try:
+        interval = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Check intervals must be integers") from exc
+    if interval < minimum:
+        return minimum
+    return interval
+
+
+def _safe_delay(task, site_id: int) -> dict:
+    try:
+        async_result = task.apply_async(args=(site_id,), retry=False, ignore_result=True)
+        return {"status": "queued", "task_id": async_result.id}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to queue %s for site %s: %s", getattr(task, "name", task), site_id, exc)
+        return {"status": "queue_failed", "error": str(exc)}

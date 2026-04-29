@@ -1,6 +1,6 @@
 from datetime import datetime
-
 from app.extensions import db
+from app.utils.time import now_utc
 
 
 class AlertHistory(db.Model):
@@ -20,7 +20,7 @@ class AlertHistory(db.Model):
     body = db.Column(db.Text, nullable=False)
     delivery_status = db.Column(db.String(32), nullable=False, default="PENDING")
     error_message = db.Column(db.Text, nullable=True)
-    sent_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    sent_at = db.Column(db.DateTime(timezone=True), default=now_utc, nullable=False)
 
     incident = db.relationship("Incident", backref=db.backref("alert_history", lazy="dynamic"))
 

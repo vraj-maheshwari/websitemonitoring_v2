@@ -10,6 +10,7 @@ send_alert() internals with SendGrid / Twilio / PagerDuty etc.
 import logging
 from datetime import datetime
 from app.config.settings import Config
+from app.utils.time import now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def check_uptime_alerts(site_url: str, status_code: int | None,
             body=(
                 f"Website: {site_url}\n"
                 f"Status:  {'No response' if status_code is None else status_code}\n"
-                f"Time:    {datetime.utcnow().isoformat()}"
+                f"Time:    {now_utc().isoformat()}"
             ),
         )
         return
@@ -43,38 +44,69 @@ def check_uptime_alerts(site_url: str, status_code: int | None,
                 f"Response time: {response_time:.2f}s "
                 f"(threshold: {Config.RESPONSE_TIME_THRESHOLD}s)\n"
                 f"Status code:   {status_code}\n"
-                f"Time:          {datetime.utcnow().isoformat()}"
+                f"Time:          {now_utc().isoformat()}"
             ),
         )
 
 
-def check_ssl_alerts(site_url: str, is_valid: bool,
-                     days_remaining: int | None, expiry_date) -> None:
+def check_ssl_alerts(site, is_valid: bool,
+                     days_remaining: int | None, expiry_date, checked_at: datetime) -> None:
     """Fire alert when SSL is invalid or expiring within the warning window."""
 
     if not is_valid:
         _send_alert(
             level="CRITICAL",
-            subject=f"[SSL INVALID] {site_url}",
+            subject=f"[SSL INVALID] {site.url}",
             body=(
-                f"Website: {site_url}\n"
+                f"Website: {site.url}\n"
                 f"Issue:   SSL certificate is invalid or could not be retrieved.\n"
-                f"Time:    {datetime.utcnow().isoformat()}"
+                f"Time:    {checked_at.isoformat()}"
             ),
         )
+        _notify_site(site, None, "SSL_INVALID", checked_at, error_message="SSL Invalid")
         return
 
     if days_remaining is not None and days_remaining <= Config.SSL_EXPIRY_WARNING_DAYS:
+        event_type = "SSL_EXPIRED" if days_remaining < 0 else "SSL_EXPIRY_WARNING"
+        if event_type == "SSL_EXPIRY_WARNING" and _daily_alert_sent(site.id, event_type, checked_at):
+            return
         _send_alert(
             level="WARNING",
-            subject=f"[SSL EXPIRING] {site_url} — {days_remaining} days left",
+            subject=f"[SSL EXPIRING] {site.url} — {days_remaining} days left",
             body=(
-                f"Website:     {site_url}\n"
+                f"Website:     {site.url}\n"
                 f"Expiry date: {expiry_date}\n"
                 f"Days left:   {days_remaining}\n"
-                f"Time:        {datetime.utcnow().isoformat()}"
+                f"Time:        {checked_at.isoformat()}"
             ),
         )
+        _notify_site(site, None, event_type, checked_at, days_remaining=days_remaining)
+
+
+def check_seo_alerts(site, score: int, status: str, checked_at: datetime) -> None:
+    """Notify only on SEO regression when a previous baseline exists."""
+    from app.models.seo_log import SEOLog
+
+    with db.session.no_autoflush:
+        previous = (
+            SEOLog.query
+            .filter(SEOLog.site_id == site.id)
+            .filter(SEOLog.checked_at < checked_at)
+            .order_by(SEOLog.checked_at.desc())
+            .first()
+        )
+
+    if previous is None:
+        logger.debug("Skipping SEO regression alert for site %s: no previous SEOLog baseline", site.id)
+        return
+
+    if score < previous.score - 5:
+        _send_alert(
+            level="WARNING",
+            subject=f"[SEO REGRESSION] {site.url} dropped from {previous.score} to {score}",
+            body=f"Website: {site.url}\nPrevious score: {previous.score}\nCurrent score: {score}\nStatus: {status}\nTime: {checked_at.isoformat()}",
+        )
+        _notify_site(site, None, "SEO_REGRESSION", checked_at, seo_score=score)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,22 +157,6 @@ def handle_uptime_transition(site, previous_status: str | None, current_status: 
         _notify_site(site, incident, "RECOVERY", checked_at, status_code, response_time, error_message)
 
 
-def check_uptime_alerts(site_url: str, status_code: int | None,
-                        response_time: float, is_up: bool) -> None:
-    logger.debug(
-        "Legacy check_uptime_alerts call for %s | status=%s | response_time=%s | is_up=%s",
-        site_url, status_code, response_time, is_up,
-    )
-
-
-def check_ssl_alerts(site_url: str, is_valid: bool,
-                     days_remaining: int | None, expiry_date) -> None:
-    logger.debug(
-        "Legacy check_ssl_alerts call for %s | is_valid=%s | days_remaining=%s | expiry=%s",
-        site_url, is_valid, days_remaining, expiry_date,
-    )
-
-
 def _open_incident(site, status_code, response_time, error_message, checked_at):
     incident = (
         Incident.query
@@ -183,8 +199,9 @@ def _resolve_incident(site, status_code, response_time, error_message, checked_a
 
 
 def _notify_site(site, incident, event_type: str, checked_at: datetime,
-                 status_code: int | None, response_time: float | None,
-                 error_message: str | None) -> None:
+                 status_code: int | None = None, response_time: float | None = None,
+                 error_message: str | None = None, days_remaining: int | None = None,
+                 seo_score: int | None = None) -> None:
     recipients = [
         notification.email
         for notification in SiteNotification.query
@@ -203,7 +220,7 @@ def _notify_site(site, incident, event_type: str, checked_at: datetime,
         return
 
     subject = _build_subject(site.display_name(), event_type)
-    body = _build_body(site, event_type, checked_at, status_code, response_time, error_message)
+    body = _build_body(site, event_type, checked_at, status_code, response_time, error_message, days_remaining, seo_score)
 
     for recipient in recipients:
         history = AlertHistory(
@@ -242,22 +259,59 @@ def _cooldown_active(site_id: int, incident_id: int | None, event_type: str, che
     return recent_alert is not None
 
 
+def _daily_alert_sent(site_id: int, event_type: str, checked_at: datetime) -> bool:
+    start_of_day = checked_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (
+        AlertHistory.query
+        .filter(AlertHistory.site_id == site_id)
+        .filter(AlertHistory.event_type == event_type)
+        .filter(AlertHistory.sent_at >= start_of_day)
+        .first()
+        is not None
+    )
+
+
 def _build_subject(site_name: str, event_type: str) -> str:
     if event_type == "DOWN":
         return f"[DOWN] {site_name} is unreachable"
-    return f"[RECOVERY] {site_name} is back online"
+    if event_type == "RECOVERY":
+        return f"[RECOVERY] {site_name} is back online"
+    if event_type == "SSL_INVALID":
+        return f"[SSL INVALID] {site_name}"
+    if event_type in {"SSL_EXPIRING", "SSL_EXPIRY_WARNING"}:
+        return f"[SSL EXPIRING] {site_name}"
+    if event_type == "SSL_EXPIRED":
+        return f"[SSL EXPIRED] {site_name}"
+    if event_type == "SEO_REGRESSION":
+        return f"[SEO REGRESSION] {site_name}"
+    if event_type == "SEO_CRITICAL":
+        return f"[SEO CRITICAL] {site_name}"
+    if event_type == "SEO_WARNING":
+        return f"[SEO WARNING] {site_name}"
+    return f"[ALERT] {site_name}: {event_type}"
 
 
 def _build_body(site, event_type: str, checked_at: datetime, status_code: int | None,
-                response_time: float | None, error_message: str | None) -> str:
-    status_label = "DOWN" if event_type == "DOWN" else "UP"
-    response_label = f"{response_time:.2f}s" if response_time is not None else "N/A"
-    return (
+                 response_time: float | None, error_message: str | None,
+                 days_remaining: int | None = None, seo_score: int | None = None) -> str:
+    body = (
         f"Site name: {site.display_name()}\n"
         f"URL: {site.url}\n"
-        f"Status: {status_label}\n"
-        f"Status code: {status_code if status_code is not None else 'N/A'}\n"
-        f"Response time: {response_label}\n"
+        f"Event: {event_type}\n"
         f"Timestamp: {checked_at.isoformat()}\n"
-        f"Error message: {error_message or 'N/A'}\n"
     )
+
+    if event_type in ["DOWN", "RECOVERY"]:
+        body += f"Status code: {status_code if status_code is not None else 'N/A'}\n"
+        body += f"Response time: {f'{response_time:.2f}s' if response_time is not None else 'N/A'}\n"
+    
+    if event_type in ["SSL_EXPIRING", "SSL_EXPIRY_WARNING", "SSL_EXPIRED"]:
+        body += f"Days remaining: {days_remaining}\n"
+    
+    if event_type in ["SEO_CRITICAL", "SEO_WARNING", "SEO_REGRESSION"]:
+        body += f"SEO Score: {seo_score}\n"
+
+    if error_message:
+        body += f"Error: {error_message}\n"
+
+    return body

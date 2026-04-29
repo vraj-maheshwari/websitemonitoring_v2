@@ -5,6 +5,7 @@ from app.config.settings import Config
 from app.extensions import db
 from app.models.site import Site
 from app.utils.urls import normalize_url
+from app.utils.time import now_utc, normalize
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ def prepare_site(site: Site) -> Site:
     if not site.name:
         site.name = canonical_url.split("//", 1)[-1]
 
-    now = datetime.utcnow()
+    now = now_utc()
     if site.next_uptime_check_at is None:
         site.next_uptime_check_at = now
     if site.next_ssl_check_at is None:
@@ -37,21 +38,20 @@ def prepare_site(site: Site) -> Site:
 
 
 def refresh_next_check_at(site: Site) -> None:
-    upcoming = [
+    upcoming = [normalize(dt) for dt in [
         site.next_uptime_check_at,
         site.next_ssl_check_at,
         site.next_seo_check_at,
-    ]
-    upcoming = [dt for dt in upcoming if dt is not None]
+    ] if dt is not None]
     site.next_check_at = min(upcoming) if upcoming else None
 
 
 def get_interval_seconds(site: Site, check_type: str) -> int:
     if check_type == CHECK_SSL:
-        return max(site.check_interval, Config.SSL_CHECK_INTERVAL_SECONDS)
+        return max(site.ssl_check_interval or 86400, 3600)
     if check_type == CHECK_SEO:
-        return max(site.check_interval, Config.SEO_CHECK_INTERVAL_SECONDS)
-    return site.check_interval
+        return max(site.seo_check_interval or 604800, 3600)
+    return max(site.uptime_check_interval or site.check_interval or 60, 30)
 
 
 def schedule_next_run(site: Site, check_type: str, checked_at: datetime) -> None:
@@ -70,7 +70,7 @@ def schedule_next_run(site: Site, check_type: str, checked_at: datetime) -> None
 
 
 def get_due_site_ids(check_type: str, now: datetime | None = None, limit: int = 100) -> list[int]:
-    now = now or datetime.utcnow()
+    now = normalize(now) or now_utc()
     field = _get_due_field(check_type)
     query = (
         Site.query

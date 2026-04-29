@@ -1,147 +1,209 @@
 {% extends "base.html" %}
 
-{% block title %}{{ site.url }} | Website Monitor{% endblock %}
+{% block title %}{{ site.url }} | Audit Report{% endblock %}
 
 {% block content %}
-<section class="detail-header panel">
-    <div>
-        <a class="text-link" href="{{ url_for('web.dashboard') }}">Back to dashboard</a>
-        <h1>{{ site.display_name() }}</h1>
-        <p class="muted">{{ site.url }}</p>
-        <p>Detailed view of uptime checks, SSL certificate health, and SEO audit signals for this monitored site.</p>
+<section id="site-detail-container" 
+         class="detail-header panel {% if site.app_status == 'checking' %}checking-overlay{% endif %}" 
+         data-site-id="{{ site.id }}" 
+         data-status="{{ site.app_status }}">
+    <div style="flex: 1;">
+        <a class="text-link small" href="{{ url_for('web.dashboard') }}">← Back to Fleet Dashboard</a>
+        <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
+            <h1>{{ site.display_name() }}</h1>
+            <div class="status-badge tone-{{ site.current_status|lower }}">{{ site.current_status }}</div>
+            {% if site.app_status == 'checking' %}
+                <div class="checking-label">
+                    <div class="spinner"></div>
+                    <span class="small">Live Analysis...</span>
+                </div>
+            {% endif %}
+        </div>
+        <p class="muted small">{{ site.url }}</p>
     </div>
+    
     <div class="detail-actions">
-        <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='uptime') }}">
-            <button type="submit" class="button button-secondary">Run uptime</button>
+        <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='all') }}" style="display: inline;">
+            <button type="submit" class="button button-primary" {% if site.app_status == 'checking' %}disabled{% endif %}>
+                Audit Now
+            </button>
         </form>
-        <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='ssl') }}">
-            <button type="submit" class="button button-secondary">Run SSL</button>
-        </form>
-        <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='seo') }}">
-            <button type="submit" class="button button-secondary">Run SEO</button>
-        </form>
-        <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='all') }}">
-            <button type="submit" class="button button-primary">Run full suite</button>
-        </form>
+        <a href="{{ url_for('web.download_report', site_id=site.id) }}" class="button button-secondary" download>
+            ⬇ Download Report
+        </a>
     </div>
 </section>
 
 <section class="metrics-grid">
     <article class="metric-card panel">
-        <span class="metric-label">Status</span>
-        <strong>{{ summary.current_status }}</strong>
-        <p>Current operational state based on the latest uptime check.</p>
+        <span class="metric-label">Operational Health</span>
+        <strong>{{ site.app_status | upper }}</strong>
+        <p class="small m-0">Aggregate system state: {{ site.uptime_status }}/{{ site.ssl_status }}/{{ site.seo_status }}</p>
     </article>
     <article class="metric-card panel">
-        <span class="metric-label">Last response</span>
-        <strong>{% if summary.last_response_time is not none %}{{ '%.2f'|format(summary.last_response_time) }}s{% else %}--{% endif %}</strong>
-        <p>Latest stored response time snapshot for this monitored website.</p>
+        <span class="metric-label">Latency</span>
+        <strong>{% if site.last_response_time %}{{ '%.3f'|format(site.last_response_time) }}s{% else %}--{% endif %}</strong>
+        <p class="small m-0">Latest TTFB / Response time snapshot.</p>
     </article>
     <article class="metric-card panel">
-        <span class="metric-label">SSL health</span>
-        <strong>
-            {% if summary.ssl_days_remaining is not none %}
-                {{ summary.ssl_days_remaining }}d
-            {% elif summary.ssl_status %}
-                {{ summary.ssl_status }}
-            {% else %}
-                Pending
-            {% endif %}
+        <span class="metric-label">Security (SSL)</span>
+        <strong>{% if site.ssl_days_remaining is not none %}{{ site.ssl_days_remaining }} Days{% else %}PENDING{% endif %}</strong>
+        <p class="small m-0">Validating: {{ site.ssl_issuer or 'Searching...' }}</p>
+    </article>
+    <article class="metric-card panel">
+        <span class="metric-label">SEO Performance</span>
+        <strong class="tone-{{ 'up' if site.seo_score >= 80 else ('warn' if site.seo_score >= 50 else 'down') }}">
+            {{ site.seo_score }}/100
         </strong>
-        <p>Days remaining or latest known certificate state.</p>
-    </article>
-    <article class="metric-card panel">
-        <span class="metric-label">SEO score</span>
-        <strong>{{ summary.seo_score }}/100</strong>
-        <p>Weighted from title, meta description, and H1 availability.</p>
+        <p class="small m-0">Dynamic weighted intelligence score.</p>
     </article>
 </section>
 
+{% if seo_logs and seo_logs[0] %}
+{% set report = seo_logs[0] %}
 <section class="dashboard-grid">
     <div class="panel">
         <div class="section-heading">
-            <span>Uptime history</span>
-            <h2>Recent HTTP checks</h2>
+            <span>Audit Engine v2.0</span>
+            <h2>Intelligence Breakdown</h2>
         </div>
-        <div class="table-shell">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Status</th>
-                        <th>Code</th>
-                        <th>Response</th>
-                        <th>Message</th>
-                        <th>Checked at</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for log in uptime_logs %}
-                        <tr>
-                            <td><span class="status-badge tone-{{ 'up' if log.is_up else 'down' }}">{{ 'Up' if log.is_up else 'Down' }}</span></td>
-                            <td>{{ log.status_code or '--' }}</td>
-                            <td>{% if log.response_time is not none %}{{ '%.2f'|format(log.response_time) }}s{% else %}--{% endif %}</td>
-                            <td>{{ log.error_message or 'Healthy response' }}</td>
-                            <td>{{ log.checked_at.strftime('%d %b %Y %H:%M') }}</td>
-                        </tr>
-                    {% else %}
-                        <tr>
-                            <td colspan="5" class="muted">No uptime logs available yet.</td>
-                        </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+        
+        <div class="audit-tabs">
+            <template id="audit-data">{{ report.to_dict() | tojson }}</template>
+            
+            <div class="audit-categories">
+                <div class="audit-cat active" onclick="switchAuditTab(event, 'on-page')">
+                    <strong>On-Page</strong>
+                    <span>Scored: {{ report.score_breakdown.on_page or 0 }}/40</span>
+                </div>
+                <div class="audit-cat" onclick="switchAuditTab(event, 'technical')">
+                    <strong>Technical</strong>
+                    <span>Scored: {{ report.score_breakdown.technical or 0 }}/25</span>
+                </div>
+                <div class="audit-cat" onclick="switchAuditTab(event, 'content')">
+                    <strong>Content</strong>
+                    <span>Scored: {{ report.score_breakdown.content or 0 }}/15</span>
+                </div>
+                <div class="audit-cat" onclick="switchAuditTab(event, 'mobile-perf')">
+                    <strong>Perf & Mobile</strong>
+                    <span>Scored: {{ (report.score_breakdown.performance or 0) + (report.score_breakdown.security_mobile or 0) }}/20</span>
+                </div>
+            </div>
+
+            <div id="audit-content" class="audit-content-panel">
+                <!-- Dynamically populated by switchAuditTab -->
+                 <div id="tab-on-page" class="audit-details">
+                    <div class="audit-item">
+                        <span>Page Title</span>
+                        <p>{{ report.title or 'MISSING' }} ({{ report.title_length }} chars)</p>
+                    </div>
+                    <div class="audit-item">
+                        <span>Meta Description</span>
+                        <p>{{ report.meta_description or 'MISSING' }} ({{ report.meta_length }} chars)</p>
+                    </div>
+                    <div class="audit-item">
+                        <span>Keyword Focus</span>
+                        <p>{{ report.keyword_density | join(', ') if report.keyword_density else 'N/A' }}</p>
+                    </div>
+                 </div>
+            </div>
         </div>
     </div>
 
     <div class="activity-stack">
-        <section class="panel">
+        <section class="panel panel-accent">
             <div class="section-heading">
-                <span>Certificate status</span>
-                <h2>SSL checks</h2>
+                <span>Recommendations</span>
+                <h2>Optimization Roadmap</h2>
             </div>
-            <div class="log-list compact-list">
-                {% for log in ssl_logs %}
-                    <article class="log-row">
-                        <div class="status-dot tone-{{ 'up' if log.is_valid else 'down' }}"></div>
-                        <div>
-                            <strong>{% if log.is_valid %}{{ log.issuer or 'Trusted issuer' }}{% else %}Certificate issue{% endif %}</strong>
-                            <p>
-                                {% if log.is_valid %}
-                                    Expires {{ log.expiry_date.strftime('%d %b %Y') if log.expiry_date else 'Unknown' }}
-                                    {% if log.days_remaining is not none %} • {{ log.days_remaining }} days left{% endif %}
-                                {% else %}
-                                    {{ log.error_message or 'SSL validation failed' }}
-                                {% endif %}
-                            </p>
+            <div class="recommendation-list">
+                {% if report.issues %}
+                    {% for issue in report.issues %}
+                        <div class="rec-item issue">
+                            <strong>{{ issue.message if issue is mapping else issue }}</strong>
+                            <p class="small">{{ issue.impact|upper if issue is mapping and issue.impact else 'ISSUE' }}: Fix this to improve ranking and health.</p>
                         </div>
-                    </article>
-                {% else %}
-                    <p class="muted">No SSL logs available yet.</p>
+                    {% endfor %}
+                {% endif %}
+                
+                {% for rec in report.recommendations %}
+                    <div class="rec-item">
+                        <strong>{{ rec.action if rec is mapping else rec }}</strong>
+                        <p class="small">{{ rec.detail if rec is mapping and rec.detail else 'SUGGESTED: Implement for better SaaS health.' }}</p>
+                    </div>
                 {% endfor %}
+                
+                {% if not report.issues and not report.recommendations %}
+                    <p class="muted small">Site is fully optimized. Excellent!</p>
+                {% endif %}
             </div>
         </section>
-
+        
         <section class="panel">
             <div class="section-heading">
-                <span>SEO status</span>
-                <h2>On-page audit</h2>
+                <span>Raw Signals</span>
+                <h2>Technical Checks</h2>
             </div>
-            <div class="log-list compact-list">
-                {% for log in seo_logs %}
-                    <article class="seo-card">
-                        <div class="seo-card-top">
-                            <span class="status-badge tone-{{ 'up' if (log.title and log.has_meta and log.has_h1) else 'warn' }}">Audit</span>
-                            <time>{{ log.checked_at.strftime('%d %b %H:%M') }}</time>
-                        </div>
-                        <p><strong>Title:</strong> {{ log.title or 'Missing' }}</p>
-                        <p><strong>Meta description:</strong> {{ log.meta_description or 'Missing' }}</p>
-                        <p><strong>H1:</strong> {{ log.h1_text or 'Missing' }}</p>
-                    </article>
-                {% else %}
-                    <p class="muted">No SEO logs available yet.</p>
-                {% endfor %}
+            <div class="signal-list small">
+                <div class="signal"><span>Robots.txt</span> <strong>{{ 'Detected' if report.has_robots else 'Missing' }}</strong></div>
+                <div class="signal"><span>Sitemap.xml</span> <strong>{{ 'Detected' if report.has_sitemap else 'Missing' }}</strong></div>
+                <div class="signal"><span>Mixed Content</span> <strong>{{ report.mixed_content_count }} Assets</strong></div>
+                <div class="signal"><span>Mobile Context</span> <strong>{{ 'Responsive' if report.mobile_friendly else 'Not Detected' }}</strong></div>
             </div>
         </section>
     </div>
 </section>
+{% else %}
+<div class="panel empty-state">
+    <h3>No Intelligence Data</h3>
+    <p>Run a full audit suite to see SEO and Technical breakdowns.</p>
+</div>
+{% endif %}
+
+<style>
+    .audit-categories { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
+    .audit-cat { padding: 15px; background: rgba(255,255,255,0.03); border-radius: 8px; cursor: pointer; transition: 0.2s; border: 1px solid transparent; }
+    .audit-cat.active { border-color: var(--accent-primary); background: rgba(99, 102, 241, 0.1); }
+    .audit-cat strong { display: block; margin-bottom: 5px; }
+    .audit-cat span { font-size: 0.8rem; color: #6366f1; }
+    
+    .audit-item { margin-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px; }
+    .audit-item span { font-size: 0.75rem; text-transform: uppercase; color: #888; font-weight: 700; }
+    
+    .rec-item { padding: 12px; border-radius: 6px; background: rgba(255,255,255,0.03); margin-bottom: 10px; border-left: 3px solid #6366f1; }
+    .rec-item.issue { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.05); }
+    
+    .signal { display: flex; justify-content: space-between; margin-bottom: 8px; }
+    .m-0 { margin: 0; }
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function switchAuditTab(event, tab) {
+        document.querySelectorAll('.audit-cat').forEach(c => c.classList.remove('active'));
+        event.currentTarget.classList.add('active');
+        // Simple tab switching for static demo
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+        const detailContainer = document.getElementById('site-detail-container');
+        if (detailContainer && detailContainer.getAttribute('data-status') === 'checking') {
+            const siteId = detailContainer.getAttribute('data-site-id');
+            const pollInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/site/${siteId}/status`);
+                    const data = await response.json();
+                    
+                    if (data.app_status === 'ready' || data.app_status === 'partial' || data.app_status === 'error') {
+                        clearInterval(pollInterval);
+                        window.location.reload();
+                    }
+                } catch (error) {
+                    console.error('Polling failed:', error);
+                }
+            }, 3000);
+        }
+    });
+</script>
 {% endblock %}

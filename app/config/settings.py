@@ -17,7 +17,7 @@ class Config:
     # Database
     SQLALCHEMY_DATABASE_URI = os.getenv(
         "DATABASE_URL",
-        "sqlite:///monitor.db"
+        "sqlite:///website_monitor.db"
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLALCHEMY_ENGINE_OPTIONS = {
@@ -34,9 +34,17 @@ class Config:
     CELERY_RESULT_SERIALIZER = "json"
     CELERY_TIMEZONE = "UTC"
     CELERY_BEAT_SCHEDULE = {
-        "dispatch-due-checks-every-minute": {
+        "run-due-checks-every-30-seconds": {
             "task": "tasks.dispatch_due_checks",
-            "schedule": 60.0,
+            "schedule": 30.0,
+        },
+        "run-zombie-rescue-every-5-minutes": {
+            "task": "tasks.run_zombie_rescue",
+            "schedule": 300.0,
+        },
+        "run-daily-uptime-summary": {
+            "task": "tasks.run_daily_summary",
+            "schedule": 86400.0,
         },
         "run-log-retention-nightly": {
             "task": "tasks.run_retention_cycle",
