@@ -175,9 +175,16 @@ def _extract_clean_text(html: str) -> str:
         return ""
 
 
+from urllib.parse import urlparse
+
+
 def _get_domain(url: str) -> str:
-    if not url: return ""
-    return url.replace("https://", "").replace("http://", "").split("/")[0]
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    # netloc includes port (e.g. example.com:8080) which is correct for
+    # the `domain in href` internal-link check.
+    return parsed.netloc or parsed.path.split("/")[0]
 
 
 def _empty_seo_report() -> dict:

@@ -172,12 +172,9 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
         logger.exception("[SEO] site_id=%s scorer exception", site.id)
         return result
 
-    previous_log = (
-        db_session.query(SEOLog)
-        .filter(SEOLog.site_id == site.id, SEOLog.fetch_valid.is_(True))
-        .order_by(SEOLog.checked_at.desc())
-        .first()
-    )
+    # Capture the old score BEFORE updating site.seo_score so the regression
+    # comparison is always old-vs-new, never new-vs-new.
+    old_score = site.seo_score if site.seo_score else None
 
     _save_seo_log(site, result, db_session, checked_at)
 
@@ -188,16 +185,15 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
     site.last_seo_fetch_valid = True
     schedule_next_run(site, CHECK_SEO, checked_at)
 
-    if previous_log is not None and previous_log.score is not None and result["score"] is not None:
-        score_drop = previous_log.score - result["score"]
-        if score_drop > 5:
-            logger.warning(
-                "[SEO] site_id=%s score regression previous=%s current=%s drop=%s",
-                site.id,
-                previous_log.score,
-                result["score"],
-                score_drop,
-            )
+    new_score = result["score"]
+    if old_score is not None and new_score is not None and new_score < old_score - 5:
+        logger.warning(
+            "[SEO] site_id=%s score regression previous=%s current=%s drop=%s",
+            site.id,
+            old_score,
+            new_score,
+            old_score - new_score,
+        )
 
     try:
         alert_service.check_seo_alerts(
@@ -205,6 +201,7 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
             score=result["score"],
             status=result["status"],
             checked_at=checked_at,
+            old_score=old_score,
         )
     except Exception:  # noqa: BLE001
         logger.exception("[SEO] alert checks failed for site_id=%s", site.id)

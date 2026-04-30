@@ -1,269 +1,500 @@
 {% extends "base.html" %}
-
-{% block title %}{{ site.url }} | Audit Report{% endblock %}
+{% block title %}{{ site.display_name() }} — WebMonitor{% endblock %}
 
 {% block content %}
-<section id="site-detail-container" 
-         class="detail-header panel {% if site.app_status == 'checking' %}checking-overlay{% endif %}" 
-         data-site-id="{{ site.id }}" 
-         data-status="{{ site.app_status }}">
-    <div style="flex: 1;">
-        <a class="text-link small" href="{{ url_for('web.dashboard') }}">← Back to Fleet Dashboard</a>
-        <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
-            <h1>{{ site.display_name() }}</h1>
-            <div class="status-badge tone-{{ site.current_status|lower }}">{{ site.current_status }}</div>
-            {% if site.app_status == 'checking' %}
-                <div class="checking-label">
-                    <div class="spinner"></div>
-                    <span class="small">Live Analysis...</span>
-                </div>
-            {% endif %}
-        </div>
-        <p class="muted small">{{ site.url }}</p>
-    </div>
-    
-    <div class="detail-actions">
-        <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='all') }}" style="display: inline;">
-            <button type="submit" class="button button-primary" {% if site.app_status == 'checking' %}disabled{% endif %}>
-                Audit Now
-            </button>
-        </form>
-        <a href="{{ url_for('web.download_report', site_id=site.id) }}" class="button button-secondary" download>
-            ⬇ Download Report
-        </a>
-    </div>
-</section>
+{% set report = seo_logs[0] if seo_logs else none %}
 
-<section class="metrics-grid">
-    <article class="metric-card panel">
-        <span class="metric-label">Operational Health</span>
-        <strong>{{ site.app_status | upper }}</strong>
-        <p class="small m-0">Aggregate system state: {{ site.uptime_status }}/{{ site.ssl_status }}/{{ site.seo_status }}</p>
-    </article>
-    <article class="metric-card panel">
-        <span class="metric-label">Latency</span>
-        <strong>{% if site.last_response_time %}{{ '%.3f'|format(site.last_response_time) }}s{% else %}--{% endif %}</strong>
-        <p class="small m-0">Latest TTFB / Response time snapshot.</p>
-    </article>
-    <article class="metric-card panel">
-        <span class="metric-label">Security (SSL)</span>
-        <strong>{% if site.ssl_days_remaining is not none %}{{ site.ssl_days_remaining }} Days{% else %}PENDING{% endif %}</strong>
-        <p class="small m-0">Validating: {{ site.ssl_issuer or 'Searching...' }}</p>
-    </article>
-    <article class="metric-card panel">
-        <span class="metric-label">SEO Performance</span>
-        <strong class="tone-{{ 'up' if site.seo_score >= 80 else ('warn' if site.seo_score >= 50 else 'down') }}">
-            {% if site.last_seo_fetch_valid is sameas false %}Invalid{% else %}{{ site.seo_score }}/100{% endif %}
-        </strong>
-        <p class="small m-0">Dynamic weighted intelligence score.</p>
-    </article>
-</section>
+{# ─── Macros for repeated color logic ─── #}
+{% macro uptime_cls(s) %}{% if s == 'UP' %}val-green{% elif s == 'DOWN' %}val-red{% else %}val-yellow{% endif %}{% endmacro %}
+{% macro rt_cls(ms) %}{% if ms and ms < 800 %}val-green{% elif ms and ms < 2000 %}val-yellow{% elif ms %}val-red{% else %}val-muted{% endif %}{% endmacro %}
+{% macro ssl_cls(d) %}{% if d is not none and d < 0 %}val-red{% elif d is not none and d < 14 %}val-yellow{% elif d is not none %}val-green{% else %}val-muted{% endif %}{% endmacro %}
+{% macro seo_cls(s) %}{% if s >= 80 %}val-green{% elif s >= 60 %}val-yellow{% elif s > 0 %}val-red{% else %}val-muted{% endif %}{% endmacro %}
+{% macro pill_uptime(s) %}{% if s == 'UP' %}pill-green{% elif s == 'DOWN' %}pill-red{% elif s == 'DEGRADED' %}pill-yellow{% else %}pill-gray{% endif %}{% endmacro %}
+{% macro pill_seo(s) %}{% if s >= 80 %}pill-green{% elif s >= 60 %}pill-yellow{% elif s > 0 %}pill-red{% else %}pill-gray{% endif %}{% endmacro %}
+{% macro pill_ssl(state) %}{% if state == 'VALID' %}pill-green{% elif state == 'EXPIRING' %}pill-yellow{% elif state in ['EXPIRED','ERROR'] %}pill-red{% else %}pill-gray{% endif %}{% endmacro %}
+{% macro score_bar_cls(score) %}{% if score >= 80 %}green{% elif score >= 60 %}yellow{% else %}red{% endif %}{% endmacro %}
+{% macro tile_cls(ratio) %}{% if ratio >= 0.8 %}val-green{% elif ratio >= 0.6 %}val-yellow{% else %}val-red{% endif %}{% endmacro %}
 
-{% if seo_logs and seo_logs[0] %}
-{% set report = seo_logs[0] %}
-{% if site.last_seo_fetch_valid is sameas false or report.fetch_valid is sameas false %}
-<section class="alert-warning panel" id="seo-invalid-warning">
-    <div>
-        <strong>SEO score may be inaccurate.</strong>
-        <p class="small m-0">
-            The last SEO scan fetched a placeholder or empty page, possibly due to server cold-start or recent downtime.
-        </p>
-        <small class="muted" id="seo-invalid-reason">
-            {{ report.invalidation_reason or 'Trigger a manual re-check when the site is fully online.' }}
-        </small>
+{# ─── 1. HEADER ─── #}
+<div class="detail-header" data-site-id="{{ site.id }}" data-status="{{ site.app_status }}">
+  <div class="detail-header-left">
+    <a href="{{ url_for('web.dashboard') }}" class="back-link">← Back to Overview</a>
+    <div class="detail-header-title">
+      <h1>{{ site.display_name() }}</h1>
+      <span class="pill {{ pill_uptime(site.current_status) }}">
+        <span class="dot {% if site.current_status == 'UP' %}dot-green{% elif site.current_status == 'DOWN' %}dot-red{% else %}dot-yellow{% endif %}"></span>
+        {{ site.current_status }}
+      </span>
+      {% if site.app_status == 'checking' %}
+        <span class="pill pill-blue">
+          <span class="spinner" style="width:10px;height:10px;margin-right:4px;"></span>Scanning…
+        </span>
+      {% endif %}
     </div>
-    <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='seo') }}">
-        <button type="submit" class="button button-secondary">Re-run SEO Check</button>
+    <div class="detail-header-url">{{ site.url }}</div>
+  </div>
+  <div class="detail-header-right">
+    <a href="{{ url_for('web.download_report', site_id=site.id) }}" class="btn btn-secondary btn-sm">⬇ Export JSON</a>
+    <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='all') }}" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn btn-primary btn-sm"
+              {% if site.app_status == 'checking' %}disabled{% endif %}>↻ Run Full Audit</button>
     </form>
-</section>
-{% endif %}
-<section class="dashboard-grid">
-    <div class="panel">
-        <div class="section-heading">
-            <span>Audit Engine v2.0</span>
-            <h2>Intelligence Breakdown</h2>
-        </div>
-        
-        <div class="audit-tabs">
-            <template id="audit-data">{{ report.to_dict() | tojson }}</template>
-            
-            <div class="audit-categories">
-                <div class="audit-cat active" onclick="switchAuditTab(event, 'on-page')">
-                    <strong>On-Page</strong>
-                    <span>Scored: {{ report.score_breakdown.on_page or 0 }}/40</span>
-                </div>
-                <div class="audit-cat" onclick="switchAuditTab(event, 'technical')">
-                    <strong>Technical</strong>
-                    <span>Scored: {{ report.score_breakdown.technical or 0 }}/25</span>
-                </div>
-                <div class="audit-cat" onclick="switchAuditTab(event, 'content')">
-                    <strong>Content</strong>
-                    <span>Scored: {{ report.score_breakdown.content or 0 }}/15</span>
-                </div>
-                <div class="audit-cat" onclick="switchAuditTab(event, 'mobile-perf')">
-                    <strong>Perf & Mobile</strong>
-                    <span>Scored: {{ (report.score_breakdown.performance or 0) + (report.score_breakdown.security_mobile or 0) }}/20</span>
-                </div>
-            </div>
+  </div>
+</div>
 
-            <div id="audit-content" class="audit-content-panel">
-                <!-- Dynamically populated by switchAuditTab -->
-                 <div id="tab-on-page" class="audit-details">
-                    <div class="audit-item">
-                        <span>Page Title</span>
-                        <p>{{ report.title or 'MISSING' }} ({{ report.title_length }} chars)</p>
-                    </div>
-                    <div class="audit-item">
-                        <span>Meta Description</span>
-                        <p>{{ report.meta_description or 'MISSING' }} ({{ report.meta_length }} chars)</p>
-                    </div>
-                    <div class="audit-item">
-                        <span>Keyword Focus</span>
-                        <p>{{ report.keyword_density | join(', ') if report.keyword_density else 'N/A' }}</p>
-                    </div>
-                 </div>
-            </div>
-        </div>
-    </div>
+{# ─── 2. METRIC CARDS ─── #}
+{% set rt_ms = (site.last_response_time * 1000) | round(0) | int if site.last_response_time else none %}
+<div class="detail-metrics">
 
-    <div class="activity-stack">
-        <section class="panel panel-accent">
-            <div class="section-heading">
-                <span>Recommendations</span>
-                <h2>Optimization Roadmap</h2>
-            </div>
-            <div class="recommendation-list">
-                {% if report.issues %}
-                    {% for issue in report.issues %}
-                        <div class="rec-item issue">
-                            <strong>{{ issue.message if issue is mapping else issue }}</strong>
-                            <p class="small">{{ issue.impact|upper if issue is mapping and issue.impact else 'ISSUE' }}: Fix this to improve ranking and health.</p>
-                        </div>
-                    {% endfor %}
-                {% endif %}
-                
-                {% for rec in report.recommendations %}
-                    <div class="rec-item">
-                        <strong>{{ rec.action if rec is mapping else rec }}</strong>
-                        <p class="small">{{ rec.detail if rec is mapping and rec.detail else 'SUGGESTED: Implement for better SaaS health.' }}</p>
-                    </div>
-                {% endfor %}
-                
-                {% if not report.issues and not report.recommendations %}
-                    <p class="muted small">Site is fully optimized. Excellent!</p>
-                {% endif %}
-            </div>
-        </section>
-        
-        <section class="panel">
-            <div class="section-heading">
-                <span>Raw Signals</span>
-                <h2>Technical Checks</h2>
-            </div>
-            <div class="signal-list small">
-                <div class="signal"><span>Robots.txt</span> <strong>{{ 'Detected' if report.has_robots else 'Missing' }}</strong></div>
-                <div class="signal"><span>Sitemap.xml</span> <strong>{{ 'Detected' if report.has_sitemap else 'Missing' }}</strong></div>
-                <div class="signal"><span>Mixed Content</span> <strong>{{ report.mixed_content_count }} Assets</strong></div>
-                <div class="signal"><span>Mobile Context</span> <strong>{{ 'Responsive' if report.mobile_friendly else 'Not Detected' }}</strong></div>
-            </div>
-        </section>
+  <div class="detail-metric-card">
+    <div class="label">Uptime Status</div>
+    <div class="value {{ uptime_cls(site.current_status) }}">{{ site.current_status }}</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap;">
+      <span class="pill {% if site.uptime_status == 'done' %}pill-green{% elif site.uptime_status == 'running' %}pill-blue{% elif site.uptime_status == 'failed' %}pill-red{% else %}pill-gray{% endif %}">
+        {{ site.uptime_status }}
+      </span>
+      {% if site.last_status_code %}
+        <span class="pill pill-gray">HTTP {{ site.last_status_code }}</span>
+      {% endif %}
     </div>
-</section>
-{% else %}
-<div class="panel empty-state">
-    <h3>No Intelligence Data</h3>
-    <p>Run a full audit suite to see SEO and Technical breakdowns.</p>
+    <div class="desc">
+      {% if site.last_uptime_check_at %}Last checked {{ site.last_uptime_check_at.strftime('%b %d, %H:%M') }}{% else %}Not checked yet{% endif %}
+    </div>
+  </div>
+
+  <div class="detail-metric-card">
+    <div class="label">Response Time</div>
+    <div class="value {{ rt_cls(rt_ms) }}">
+      {% if rt_ms %}{{ rt_ms }}<span class="val-muted" style="font-size:1rem;font-weight:500;">ms</span>{% else %}—{% endif %}
+    </div>
+    <div style="margin-bottom:6px;">
+      {% if rt_ms %}
+        <span class="pill {% if rt_ms < 800 %}pill-green{% elif rt_ms < 2000 %}pill-yellow{% else %}pill-red{% endif %}">
+          {% if rt_ms < 800 %}Fast{% elif rt_ms < 2000 %}Moderate{% else %}Slow — above 2s{% endif %}
+        </span>
+      {% endif %}
+    </div>
+    <div class="desc">TTFB: {% if site.last_ttfb %}{{ '%.0f'|format(site.last_ttfb * 1000) }}ms{% else %}—{% endif %}</div>
+  </div>
+
+  <div class="detail-metric-card">
+    <div class="label">SSL Certificate</div>
+    <div class="value {{ ssl_cls(site.ssl_days_remaining) }}">
+      {% if site.ssl_days_remaining is not none %}
+        {{ site.ssl_days_remaining }}<span class="val-muted" style="font-size:1rem;font-weight:500;">d</span>
+      {% else %}—{% endif %}
+    </div>
+    <div style="margin-bottom:6px;">
+      <span class="pill {{ pill_ssl(site.ssl_state) }}">{{ site.ssl_state }}</span>
+    </div>
+    <div class="desc">{{ site.ssl_issuer or 'Issuer unknown' }}</div>
+  </div>
+
+  <div class="detail-metric-card">
+    <div class="label">SEO Score</div>
+    <div class="value {{ seo_cls(site.seo_score) }}">
+      {% if site.last_seo_fetch_valid is sameas false %}N/A
+      {% elif site.seo_score > 0 %}{{ site.seo_score }}<span class="val-muted" style="font-size:1rem;font-weight:500;">/100</span>
+      {% else %}—{% endif %}
+    </div>
+    <div style="margin-bottom:6px;">
+      <span class="pill {{ pill_seo(site.seo_score) }}">
+        {% if site.seo_score >= 80 %}Good{% elif site.seo_score >= 60 %}Fair{% elif site.seo_score > 0 %}Poor{% else %}Pending{% endif %}
+      </span>
+    </div>
+    <div class="desc">{{ site.seo_state }} · {{ site.seo_status }}</div>
+  </div>
+
+</div>
+
+{# ─── 3. INVALID FETCH ALERT ─── #}
+{% if report and (site.last_seo_fetch_valid is sameas false or report.fetch_valid is sameas false) %}
+<div class="alert-banner">
+  <div class="alert-banner-content">
+    <strong>⚠ SEO score may be inaccurate</strong>
+    <p>Last scan fetched a placeholder or empty page — possibly due to server cold-start or recent downtime.</p>
+    <small>{{ report.invalidation_reason or 'Re-run the audit when the site is fully online.' }}</small>
+  </div>
+  <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='seo') }}" style="margin:0;">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button type="submit" class="btn btn-secondary btn-sm">↻ Re-run SEO</button>
+  </form>
 </div>
 {% endif %}
 
-{% if seo_logs %}
-<section class="panel seo-history-panel">
-    <div class="section-heading">
-        <span>SEO History</span>
-        <h2>Fetch Quality</h2>
+{# ─── 4. MAIN GRID ─── #}
+<div class="detail-grid">
+<div class="detail-main">
+
+{% if report %}
+<div class="card">
+  <div class="section-head">
+    <div>
+      <div class="label">Audit Engine</div>
+      <h2>Intelligence Breakdown</h2>
     </div>
-    <div class="table-shell">
-        <table>
-            <thead>
-                <tr>
-                    <th>Checked At</th>
-                    <th>Score</th>
-                    <th>Status</th>
-                    <th>Page Size</th>
-                    <th>Fetch Valid</th>
-                    <th>Note</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for log in seo_logs %}
-                <tr class="{% if log.fetch_valid is sameas false %}table-warning{% endif %}">
-                    <td>{{ log.checked_at.strftime('%b %d %H:%M') }}</td>
-                    <td>
-                        {% if log.fetch_valid and log.score is not none %}
-                            <span class="status-badge tone-{{ 'up' if log.score >= 80 else ('warn' if log.score >= 60 else 'down') }}">{{ log.score }}</span>
-                        {% else %}
-                            <span class="status-badge tone-warn">Invalid</span>
-                        {% endif %}
-                    </td>
-                    <td>{{ log.status }}</td>
-                    <td>{% if log.fetch_page_size_kb is not none %}{{ '%.1f'|format(log.fetch_page_size_kb) }} KB{% else %}--{% endif %}</td>
-                    <td>{{ 'Yes' if log.fetch_valid else 'No' }}</td>
-                    <td class="small">{{ log.invalidation_reason if not log.fetch_valid else '--' }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+    {%- if report.fetch_valid and report.score is not none %}
+    <span class="pill {% if report.score >= 80 %}pill-green{% elif report.score >= 60 %}pill-yellow{% else %}pill-red{% endif %}">
+      Score: {{ report.score }}/100
+    </span>
+    {%- elif not report.fetch_valid %}
+    <span class="pill pill-yellow">Invalid fetch — no score</span>
+    {%- endif %}
+  </div>
+
+  {%- if report.fetch_valid and report.score is not none %}
+  {%- set sc = report.score %}
+  <div style="margin-bottom:20px;">
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+      <span class="small muted">Overall SEO Score</span>
+      <span class="small" style="font-weight:700;">{{ sc }}/100</span>
     </div>
-</section>
+    <div style="height:8px;background:var(--surface-3);border-radius:4px;overflow:hidden;">
+      <div class="bar-fill {{ score_bar_cls(sc) }}" style="width:{{ sc }}%;"></div>
+    </div>
+    {%- set op = report.score_breakdown.on_page        or 0 %}
+    {%- set tc = report.score_breakdown.technical       or 0 %}
+    {%- set ct = report.score_breakdown.content         or 0 %}
+    {%- set pf = report.score_breakdown.performance     or 0 %}
+    {%- set sm = report.score_breakdown.security_mobile or 0 %}
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:12px;">
+      <div class="score-tile">
+        <div class="tile-val {{ tile_cls(op / 100) }}">{{ op }}<span class="tile-denom">/100</span></div>
+        <div class="tile-lbl">On-Page</div>
+        <div class="tile-contrib">+{{ (op * 0.40) | round(1) }} pts · 40% wt</div>
+      </div>
+      <div class="score-tile">
+        <div class="tile-val {{ tile_cls(tc / 100) }}">{{ tc }}<span class="tile-denom">/100</span></div>
+        <div class="tile-lbl">Technical</div>
+        <div class="tile-contrib">+{{ (tc * 0.25) | round(1) }} pts · 25% wt</div>
+      </div>
+      <div class="score-tile">
+        <div class="tile-val {{ tile_cls(ct / 100) }}">{{ ct }}<span class="tile-denom">/100</span></div>
+        <div class="tile-lbl">Content</div>
+        <div class="tile-contrib">+{{ (ct * 0.15) | round(1) }} pts · 15% wt</div>
+      </div>
+      <div class="score-tile">
+        <div class="tile-val {{ tile_cls(pf / 100) }}">{{ pf }}<span class="tile-denom">/100</span></div>
+        <div class="tile-lbl">Performance</div>
+        <div class="tile-contrib">+{{ (pf * 0.10) | round(1) }} pts · 10% wt</div>
+      </div>
+      <div class="score-tile">
+        <div class="tile-val {{ tile_cls(sm / 100) }}">{{ sm }}<span class="tile-denom">/100</span></div>
+        <div class="tile-lbl">Sec+Mobile</div>
+        <div class="tile-contrib">+{{ (sm * 0.10) | round(1) }} pts · 10% wt</div>
+      </div>
+    </div>
+  </div>
+  {%- else %}
+  <div class="invalid-fetch-notice">
+    <span>⚠</span>
+    <span>Score unavailable — last fetch returned invalid content. Re-run the audit when the site is fully online.</span>
+  </div>
+  {%- endif %}
+
+  {# Tab nav #}
+  <div class="tabs-nav">
+    <button class="tab-btn active"  onclick="switchTab(event,'on-page')">On-Page</button>
+    <button class="tab-btn"         onclick="switchTab(event,'technical')">Technical</button>
+    <button class="tab-btn"         onclick="switchTab(event,'content')">Content</button>
+    <button class="tab-btn"         onclick="switchTab(event,'perf')">Perf &amp; Mobile</button>
+  </div>
+
+  {# ── ON-PAGE ── #}
+  <div id="tab-on-page" class="tab-content active">
+    <div class="audit-grid">
+      <div class="audit-item">
+        <div class="label">Page Title</div>
+        <div class="value">{{ report.title or '—' }} <em>({{ report.title_length }} chars)</em></div>
+        <div style="margin-top:6px;">
+          <span class="pill {% if report.title_length >= 50 and report.title_length <= 60 %}pill-green{% elif report.title_length > 0 %}pill-yellow{% else %}pill-red{% endif %}">
+            {% if report.title_length == 0 %}Missing{% elif report.title_length < 50 %}Too short{% elif report.title_length > 60 %}Too long{% else %}Optimal{% endif %}
+          </span>
+        </div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Meta Description</div>
+        <div class="value">
+          {% if report.meta_description %}{{ report.meta_description[:80] }}{% if report.meta_description|length > 80 %}…{% endif %}{% else %}—{% endif %}
+          <em>({{ report.meta_length }} chars)</em>
+        </div>
+        <div style="margin-top:6px;">
+          <span class="pill {% if report.meta_length >= 120 and report.meta_length <= 160 %}pill-green{% elif report.meta_length > 0 %}pill-yellow{% else %}pill-red{% endif %}">
+            {% if report.meta_length == 0 %}Missing{% elif report.meta_length < 120 %}Too short{% elif report.meta_length > 160 %}Too long{% else %}Optimal{% endif %}
+          </span>
+        </div>
+      </div>
+      <div class="audit-item">
+        <div class="label">H1 Tags</div>
+        <div class="value">{{ report.h1_count }} found</div>
+        <div style="margin-top:6px;">
+          <span class="pill {% if report.h1_count == 1 %}pill-green{% elif report.h1_count == 0 %}pill-red{% else %}pill-yellow{% endif %}">
+            {% if report.h1_count == 1 %}Correct{% elif report.h1_count == 0 %}Missing{% else %}Multiple H1s{% endif %}
+          </span>
+        </div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Heading Structure</div>
+        <div class="value">H2: {{ report.h2_count }} · H3: {{ report.h3_count }}</div>
+      </div>
+      <div class="audit-item" style="grid-column:1/-1;">
+        <div class="label">Top Keywords</div>
+        <div class="value">{{ report.keyword_density | join(', ') if report.keyword_density else 'No data' }}</div>
+      </div>
+    </div>
+  </div>
+
+  {# ── TECHNICAL ── #}
+  <div id="tab-technical" class="tab-content">
+    <div class="audit-grid">
+      <div class="audit-item">
+        <div class="label">Canonical URL</div>
+        <div class="value truncate">{{ report.canonical or '—' }}</div>
+        <div style="margin-top:6px;"><span class="pill {% if report.canonical %}pill-green{% else %}pill-red{% endif %}">{% if report.canonical %}Set{% else %}Missing{% endif %}</span></div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Robots.txt</div>
+        <div class="value"><span class="pill {% if report.has_robots %}pill-green{% else %}pill-yellow{% endif %}">{% if report.has_robots %}Detected{% else %}Missing{% endif %}</span></div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Sitemap.xml</div>
+        <div class="value"><span class="pill {% if report.has_sitemap %}pill-green{% else %}pill-yellow{% endif %}">{% if report.has_sitemap %}Detected{% else %}Missing{% endif %}</span></div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Robots Meta</div>
+        <div class="value">{{ report.robots_meta or 'Not set' }}</div>
+        {% if report.has_noindex %}<div style="margin-top:6px;"><span class="pill pill-red">noindex detected!</span></div>{% endif %}
+      </div>
+      <div class="audit-item">
+        <div class="label">HTML Lang</div>
+        <div class="value"><span class="pill {% if report.html_lang %}pill-green{% else %}pill-yellow{% endif %}">{% if report.html_lang %}{{ report.html_lang }}{% else %}Not set{% endif %}</span></div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Favicon · Hreflang</div>
+        <div class="value" style="display:flex;gap:6px;flex-wrap:wrap;">
+          <span class="pill {% if report.has_favicon %}pill-green{% else %}pill-gray{% endif %}">Favicon {% if report.has_favicon %}✓{% else %}✗{% endif %}</span>
+          <span class="pill {% if report.has_hreflang %}pill-green{% else %}pill-gray{% endif %}">Hreflang {% if report.has_hreflang %}✓{% else %}✗{% endif %}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ── CONTENT ── #}
+  <div id="tab-content" class="tab-content">
+    <div class="audit-grid">
+      <div class="audit-item">
+        <div class="label">Word Count</div>
+        <div class="value">{{ report.word_count }}</div>
+        <div style="margin-top:6px;"><span class="pill {% if report.word_count >= 300 %}pill-green{% else %}pill-yellow{% endif %}">{% if report.word_count >= 300 %}Meets threshold{% else %}Below 300 words{% endif %}</span></div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Images / Alt Text</div>
+        <div class="value">{{ report.image_count }} images · {{ report.missing_alt_count }} missing alt</div>
+        <div style="margin-top:6px;"><span class="pill {% if report.missing_alt_count == 0 %}pill-green{% else %}pill-yellow{% endif %}">{% if report.missing_alt_count == 0 %}All covered{% else %}{{ report.missing_alt_count }} need alt text{% endif %}</span></div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Internal Links</div>
+        <div class="value">{{ report.internal_link_count }}</div>
+      </div>
+      <div class="audit-item">
+        <div class="label">External Links</div>
+        <div class="value">{{ report.external_link_count }}</div>
+      </div>
+    </div>
+  </div>
+
+  {# ── PERF & MOBILE ── #}
+  <div id="tab-perf" class="tab-content">
+    {% set ttfb_ms = (report.ttfb * 1000) | round(0) | int if report.ttfb else none %}
+    <div class="audit-grid">
+      <div class="audit-item">
+        <div class="label">TTFB</div>
+        <div class="value {% if ttfb_ms and ttfb_ms < 800 %}val-green{% elif ttfb_ms and ttfb_ms < 1500 %}val-yellow{% elif ttfb_ms %}val-red{% else %}val-muted{% endif %}">
+          {% if ttfb_ms %}{{ ttfb_ms }}ms{% else %}—{% endif %}
+        </div>
+        {% if ttfb_ms %}<div style="margin-top:6px;"><span class="pill {% if ttfb_ms < 800 %}pill-green{% elif ttfb_ms < 1500 %}pill-yellow{% else %}pill-red{% endif %}">{% if ttfb_ms < 800 %}Fast{% elif ttfb_ms < 1500 %}Moderate{% else %}Slow{% endif %}</span></div>{% endif %}
+      </div>
+      <div class="audit-item">
+        <div class="label">Page Size</div>
+        <div class="value {% if report.page_size_kb and report.page_size_kb < 500 %}val-green{% elif report.page_size_kb and report.page_size_kb < 1000 %}val-yellow{% elif report.page_size_kb %}val-red{% else %}val-muted{% endif %}">
+          {% if report.page_size_kb %}{{ '%.1f'|format(report.page_size_kb) }} KB{% else %}—{% endif %}
+        </div>
+        {% if report.page_size_kb %}<div style="margin-top:6px;"><span class="pill {% if report.page_size_kb < 500 %}pill-green{% elif report.page_size_kb < 1000 %}pill-yellow{% else %}pill-red{% endif %}">{% if report.page_size_kb < 500 %}Good{% elif report.page_size_kb < 1000 %}Large{% else %}Too large{% endif %}</span></div>{% endif %}
+      </div>
+      <div class="audit-item">
+        <div class="label">Blocking Resources</div>
+        <div class="value">{{ report.js_blocking_count }} JS · {{ report.css_blocking_count }} CSS</div>
+        {% set total_blocking = report.js_blocking_count + report.css_blocking_count %}
+        <div style="margin-top:6px;"><span class="pill {% if total_blocking == 0 %}pill-green{% elif total_blocking <= 2 %}pill-yellow{% else %}pill-red{% endif %}">{% if total_blocking == 0 %}None{% else %}{{ total_blocking }} blocking{% endif %}</span></div>
+      </div>
+      <div class="audit-item">
+        <div class="label">Viewport · HTTPS · Mixed</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;">
+          <span class="pill {% if report.has_viewport %}pill-green{% else %}pill-red{% endif %}">Viewport {% if report.has_viewport %}✓{% else %}✗{% endif %}</span>
+          <span class="pill {% if report.https_redirect %}pill-green{% else %}pill-yellow{% endif %}">HTTPS {% if report.https_redirect %}✓{% else %}✗{% endif %}</span>
+          <span class="pill {% if report.mixed_content_count == 0 %}pill-green{% else %}pill-red{% endif %}">Mixed {% if report.mixed_content_count == 0 %}✓{% else %}{{ report.mixed_content_count }}{% endif %}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>{# /card #}
 {% endif %}
 
-<style>
-    .audit-categories { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
-    .audit-cat { padding: 15px; background: rgba(255,255,255,0.03); border-radius: 8px; cursor: pointer; transition: 0.2s; border: 1px solid transparent; }
-    .audit-cat.active { border-color: var(--accent-primary); background: rgba(99, 102, 241, 0.1); }
-    .audit-cat strong { display: block; margin-bottom: 5px; }
-    .audit-cat span { font-size: 0.8rem; color: #6366f1; }
-    
-    .audit-item { margin-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 10px; }
-    .audit-item span { font-size: 0.75rem; text-transform: uppercase; color: #888; font-weight: 700; }
-    
-    .rec-item { padding: 12px; border-radius: 6px; background: rgba(255,255,255,0.03); margin-bottom: 10px; border-left: 3px solid #6366f1; }
-    .rec-item.issue { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.05); }
-    
-    .signal { display: flex; justify-content: space-between; margin-bottom: 8px; }
-    .m-0 { margin: 0; }
-    .alert-warning { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-bottom: 24px; border-color: rgba(255, 180, 77, 0.45); background: rgba(255, 180, 77, 0.10); }
-    .seo-history-panel { margin-top: 24px; }
-    .table-warning { background: rgba(255, 180, 77, 0.08); }
-</style>
+{# SEO History #}
+{% if seo_logs %}
+<div class="card">
+  <div class="section-head">
+    <div class="label">SEO History</div>
+    <h2>Scan Log</h2>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="history-table">
+      <thead><tr><th>Date</th><th>Score</th><th>Status</th><th>Page Size</th><th>Fetch</th><th>Note</th></tr></thead>
+      <tbody>
+        {% for log in seo_logs %}
+        <tr class="{% if not log.fetch_valid %}warning{% endif %}">
+          <td class="mono" style="font-size:.78rem;">{{ log.checked_at.strftime('%b %d %H:%M') }}</td>
+          <td>
+            {% if log.fetch_valid and log.score is not none %}
+              <span class="pill {% if log.score >= 80 %}pill-green{% elif log.score >= 60 %}pill-yellow{% else %}pill-red{% endif %}">{{ log.score }}</span>
+            {% else %}<span class="pill pill-gray">Invalid</span>{% endif %}
+          </td>
+          <td><span class="pill pill-gray" style="font-size:.72rem;">{{ log.status }}</span></td>
+          <td class="muted small">{% if log.fetch_page_size_kb is not none %}{{ '%.1f'|format(log.fetch_page_size_kb) }} KB{% else %}—{% endif %}</td>
+          <td><span class="pill {% if log.fetch_valid %}pill-green{% else %}pill-yellow{% endif %}">{% if log.fetch_valid %}Valid{% else %}Invalid{% endif %}</span></td>
+          <td class="muted small truncate" style="max-width:180px;">{{ log.invalidation_reason if not log.fetch_valid else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+</div>{# /detail-main #}
+
+
+{# ─── RIGHT SIDEBAR ─── #}
+<div class="detail-side">
+
+  {# Top Fixes #}
+  {% if report and report.issues %}
+  <div class="card">
+    <div class="section-head">
+      <div>
+        <div class="label">Recommendations</div>
+        <h2>Top Fixes to Improve Your Score</h2>
+      </div>
+    </div>
+    <div class="rec-list">
+      {% for issue in report.issues[:6] %}
+      <div class="rec-item issue">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <span class="pill {% if issue is mapping and issue.impact == 'high' %}pill-red{% elif issue is mapping and issue.impact == 'medium' %}pill-yellow{% else %}pill-gray{% endif %}">
+            {{ (issue.impact | upper) if issue is mapping else 'ISSUE' }}
+          </span>
+          <span class="small muted">{{ (issue.category | upper) if issue is mapping else '' }}</span>
+        </div>
+        <strong>{{ issue.message if issue is mapping else issue }}</strong>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {# Raw Signals #}
+  <div class="card">
+    <div class="section-head">
+      <div class="label">Raw Signals</div>
+      <h2>Technical Checks</h2>
+    </div>
+    {% if report %}
+    <div class="signal-list">
+      <div class="signal-row"><span>Robots.txt</span><strong class="{% if report.has_robots %}val-green{% else %}val-yellow{% endif %}">{% if report.has_robots %}✓ Found{% else %}✗ Missing{% endif %}</strong></div>
+      <div class="signal-row"><span>Sitemap.xml</span><strong class="{% if report.has_sitemap %}val-green{% else %}val-yellow{% endif %}">{% if report.has_sitemap %}✓ Found{% else %}✗ Missing{% endif %}</strong></div>
+      <div class="signal-row"><span>Canonical</span><strong class="{% if report.canonical %}val-green{% else %}val-red{% endif %}">{% if report.canonical %}✓ Set{% else %}✗ Missing{% endif %}</strong></div>
+      <div class="signal-row"><span>HTTPS Redirect</span><strong class="{% if report.https_redirect %}val-green{% else %}val-yellow{% endif %}">{% if report.https_redirect %}✓ Enforced{% else %}✗ Not detected{% endif %}</strong></div>
+      <div class="signal-row"><span>Mobile Viewport</span><strong class="{% if report.has_viewport %}val-green{% else %}val-red{% endif %}">{% if report.has_viewport %}✓ Present{% else %}✗ Missing{% endif %}</strong></div>
+      <div class="signal-row"><span>Mixed Content</span><strong class="{% if report.mixed_content_count == 0 %}val-green{% else %}val-red{% endif %}">{% if report.mixed_content_count == 0 %}✓ None{% else %}{{ report.mixed_content_count }} assets{% endif %}</strong></div>
+      <div class="signal-row"><span>noindex</span><strong class="{% if report.has_noindex %}val-red{% else %}val-green{% endif %}">{% if report.has_noindex %}⚠ Detected{% else %}✓ Not set{% endif %}</strong></div>
+      <div class="signal-row"><span>Favicon</span><strong class="{% if report.has_favicon %}val-green{% else %}val-muted{% endif %}">{% if report.has_favicon %}✓ Present{% else %}Not found{% endif %}</strong></div>
+    </div>
+    {% else %}
+    <p class="muted small" style="padding:16px 0;">No SEO data yet. Run an audit to see signals.</p>
+    {% endif %}
+  </div>
+
+  {# SSL Details #}
+  <div class="card">
+    <div class="section-head">
+      <div class="label">SSL Certificate</div>
+      <h2>Certificate Details</h2>
+    </div>
+    <div class="signal-list">
+      <div class="signal-row"><span>State</span><strong><span class="pill {{ pill_ssl(site.ssl_state) }}">{{ site.ssl_state }}</span></strong></div>
+      <div class="signal-row"><span>Days Remaining</span><strong class="{{ ssl_cls(site.ssl_days_remaining) }}">{% if site.ssl_days_remaining is not none %}{{ site.ssl_days_remaining }} days{% else %}—{% endif %}</strong></div>
+      <div class="signal-row"><span>Expiry Date</span><strong>{% if site.ssl_expiry_date %}{{ site.ssl_expiry_date.strftime('%b %d, %Y') }}{% else %}—{% endif %}</strong></div>
+      <div class="signal-row"><span>Issuer</span><strong class="truncate" style="max-width:160px;">{{ site.ssl_issuer or '—' }}</strong></div>
+      <div class="signal-row"><span>Last Checked</span><strong>{% if site.last_ssl_check_at %}{{ site.last_ssl_check_at.strftime('%b %d, %H:%M') }}{% else %}—{% endif %}</strong></div>
+    </div>
+    <div style="margin-top:12px;">
+      <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='ssl') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-secondary btn-sm" style="width:100%;justify-content:center;">↻ Re-check SSL</button>
+      </form>
+    </div>
+  </div>
+
+  {# Uptime log #}
+  {% if uptime_logs %}
+  <div class="card">
+    <div class="section-head">
+      <div class="label">Uptime Log</div>
+      <h2>Recent Checks</h2>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      {% for log in uptime_logs[:10] %}
+      <div class="uptime-row">
+        <div class="dot {% if log.is_up %}dot-green{% else %}dot-red{% endif %}"></div>
+        <span class="time mono">{{ log.checked_at.strftime('%H:%M:%S') }}</span>
+        <span class="lat">{% if log.response_time %}{{ '%.0f'|format(log.response_time * 1000) }}ms{% else %}—{% endif %}</span>
+        <span class="pill {% if log.is_up %}pill-green{% else %}pill-red{% endif %}" style="font-size:.68rem;padding:2px 7px;">{{ log.status_code or 'ERR' }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+</div>{# /detail-side #}
+</div>{# /detail-grid #}
+
 {% endblock %}
 
 {% block scripts %}
 <script>
-    function switchAuditTab(event, tab) {
-        document.querySelectorAll('.audit-cat').forEach(c => c.classList.remove('active'));
-        event.currentTarget.classList.add('active');
-        // Simple tab switching for static demo
-    }
+function switchTab(e, name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(p => p.classList.remove('active'));
+  e.currentTarget.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
 
-    document.addEventListener('DOMContentLoaded', function() {
-        const detailContainer = document.getElementById('site-detail-container');
-        if (detailContainer && detailContainer.getAttribute('data-status') === 'checking') {
-            const siteId = detailContainer.getAttribute('data-site-id');
-            const pollInterval = setInterval(async () => {
-                try {
-                    const response = await fetch(`/api/site/${siteId}/status`);
-                    const data = await response.json();
-                    
-                    if (data.app_status === 'ready' || data.app_status === 'partial' || data.app_status === 'error') {
-                        clearInterval(pollInterval);
-                        window.location.reload();
-                    }
-                } catch (error) {
-                    console.error('Polling failed:', error);
-                }
-            }, 3000);
+document.addEventListener('DOMContentLoaded', function () {
+  const hdr = document.querySelector('[data-status]');
+  if (hdr && hdr.dataset.status === 'checking') {
+    const id = hdr.dataset.siteId;
+    const iv = setInterval(async () => {
+      try {
+        const r = await fetch('/api/site/' + id + '/status');
+        const d = await r.json();
+        if (d.app_status === 'ready' || d.app_status === 'partial') {
+          clearInterval(iv); window.location.reload();
         }
-    });
+      } catch(e) {}
+    }, 3000);
+  }
+});
 </script>
 {% endblock %}

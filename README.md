@@ -1,828 +1,848 @@
-# Website Monitor and SEO Intelligence Engine
-
-This project is a Flask + Celery SaaS-style website monitoring system. It monitors each website through three independent checks:
-
-- Uptime
-- SSL certificate health
-- SEO quality
-
-The system is designed so a slow or unstable website does not create misleading SEO results. SEO scans now validate fetched HTML before scoring, store fetch debugging data, and skip scoring cold-start placeholder pages.
-
-## Current System Flow
-
-### 1. User Adds A Website
-
-A site can be created from the dashboard or through the API.
-
-Flow:
-
-1. User submits a URL and optional name/check intervals.
-2. The URL is normalized by `app/utils/urls.py`.
-3. A `Site` row is created.
-4. Initial check timestamps are prepared by `prepare_site()`.
-5. Notification email recipients are saved if provided.
-6. The app queues three Celery jobs:
-   - uptime check
-   - SSL check
-   - SEO check
-7. The dashboard starts polling for updates.
-
-Main files:
-
-- `app/api/routes.py`
-- `app/models/site.py`
-- `app/services/monitoring_service.py`
-- `app/workers/tasks.py`
-
-## Data Model Logic
-
-### Site
-
-`Site` is the main monitored entity.
-
-Important fields:
-
-- URL identity: `url`, `normalized_url`, `name`
-- ownership: `user_id`
-- intervals: `uptime_check_interval`, `ssl_check_interval`, `seo_check_interval`
-- last check timestamps: `last_uptime_check_at`, `last_ssl_check_at`, `last_seo_check_at`
-- next check timestamps: `next_uptime_check_at`, `next_ssl_check_at`, `next_seo_check_at`
-- per-check status: `uptime_status`, `ssl_status`, `seo_status`
-- aggregate status: `app_status`
-- uptime state: `current_status`, `last_status_code`, `last_response_time`, `last_ttfb`
-- SSL state: `ssl_state`, `ssl_issuer`, `ssl_expiry_date`, `ssl_days_remaining`
-- SEO state: `seo_score`, `seo_state`, `last_seo_fetch_valid`
-- SEO cooldown support: `last_downtime_ended_at`
-
-### SEOLog
-
-`SEOLog` stores both the SEO score and the fetch quality metadata.
-
-Important fetch-validation fields:
-
-- `fetch_valid`
-- `fetch_status`
-- `fetch_page_size_kb`
-- `fetch_html_preview`
-- `invalidation_reason`
-
-If `fetch_valid=False`, the log is stored for debugging, but no SEO score is produced.
-
-## Status Logic
-
-Each check has its own status:
-
-```text
-pending -> running -> done
-pending -> running -> failed
-```
-
-Fields:
-
-- `uptime_status`
-- `ssl_status`
-- `seo_status`
-
-The user-facing `app_status` is derived by `Site.refresh_app_status()`:
-
-- `pending`: all checks are pending
-- `checking`: at least one check is running
-- `ready`: all checks are done
-- `partial`: mixed results or at least one failed check
-
-This prevents one successful check from hiding another failed check.
-
-## Uptime Check Flow
-
-Main file:
-
-- `app/services/monitor_service.py`
-
-Flow:
-
-1. Celery task acquires the uptime lock.
-2. `fetch_url(site.url, timeout=5.0)` runs an HTTP GET.
-3. The result stores:
-   - status code
-   - response time
-   - TTFB
-   - final URL
-   - error message, if any
-4. The service determines the current uptime state:
-   - `DOWN` if fetch failed or status is not up
-   - `DEGRADED` if response time is above `RESPONSE_TIME_THRESHOLD`
-   - `UP` otherwise
-5. A `UptimeLog` row is created.
-6. The `Site` uptime fields are updated.
-7. The next uptime check is scheduled.
-8. Alert logic runs for downtime/recovery transitions.
-9. If previous status was `DOWN` and current status becomes `UP` or `DEGRADED`, the system records:
-
-```python
-site.last_downtime_ended_at = checked_at
-```
-
-That timestamp activates the SEO cooldown.
-
-## SEO Cooldown Logic
-
-Main file:
-
-- `app/services/seo_service.py`
-
-SEO should not run immediately after a site recovers from downtime because many free PHP hosts return a cold, blank, or placeholder page during warm-up.
-
-Rule:
-
-```text
-If site recovered from DOWN less than 120 seconds ago, skip/reschedule SEO.
-```
-
-Function:
-
-```python
-should_skip_seo_for_cooldown(site)
-```
-
-If cooldown is active:
-
-- Celery SEO task reschedules itself after 120 seconds.
-- Manual API checks return cooldown status.
-- SEO service logs an invalid fetch result if called directly.
-
-## SEO Check Flow
-
-Main file:
-
-- `app/services/seo_service.py`
-
-SEO now has a safe, multi-step pipeline.
-
-### Step 1: Cooldown Check
-
-Before fetching HTML, SEO checks:
-
-```python
-should_skip_seo_for_cooldown(site)
-```
-
-If the site recently recovered from DOWN, SEO is skipped to avoid scoring a cold-start placeholder page.
-
-### Step 2: Fetch HTML
-
-SEO fetch uses:
-
-```python
-fetch_url(site.url, timeout=25.0, stream_for_ttfb=True)
-```
-
-SEO uses a longer timeout than uptime because full HTML pages, especially on free hosting, can take longer than a simple uptime request.
-
-The fetch result includes:
-
-- `html_content`
-- `ttfb`
-- `total_response_time`
-- `status_code`
-- `is_up`
-- `error`
-- `final_url`
-- `https_redirect`
-- `page_size_kb`
-
-### Step 3: Validate Fetch
-
-Before parsing or scoring, the fetched HTML is passed through:
-
-```python
-validate_seo_fetch(...)
-```
-
-Main file:
-
-- `app/utils/seo_validator.py`
-
-The validator rejects:
-
-- empty responses
-- timeout/error responses
-- HTTP error pages
-- pages smaller than 5 KB
-- host placeholders such as account suspended, coming soon, InfinityFree, great-site.net placeholders, default nginx/Apache pages, and directory listings
-
-If validation fails:
-
-- `SEOLog.fetch_valid=False`
-- `SEOLog.score=None`
-- `SEOLog.status="INVALID"`
-- `SEOLog.fetch_status` is set to `empty`, `timeout`, `error`, or `invalid_content`
-- `SEOLog.fetch_page_size_kb` stores the actual size
-- `SEOLog.fetch_html_preview` stores the first 1000 characters
-- `SEOLog.invalidation_reason` explains what happened
-- `Site.last_seo_fetch_valid=False`
-- No SEO score is generated
-- No false `POOR` rating is shown
-
-### Step 4: Parse SEO Signals
-
-If fetch validation passes, the HTML is parsed by:
-
-```python
-parse_seo_intelligence(html_content, site.url)
-```
-
-Main file:
-
-- `app/utils/parser.py`
-
-Extracted signals include:
-
-- title and title length
-- meta description and length
-- H1/H2/H3 counts
-- word count
-- keyword density
-- image count and missing alt count
-- internal and external links
-- canonical URL
-- favicon
-- hreflang
-- robots meta
-- HTML language
-- viewport/mobile signal
-- mixed content count
-- blocking JS/CSS counts
-- page size
-
-The SEO service also checks:
-
-- `/robots.txt`
-- `/sitemap.xml`
-
-Those resource checks use separate HEAD requests with an 8 second timeout.
-
-### Step 5: Score SEO
-
-Scoring is handled by:
-
-```python
-analyze_seo(signals)
-```
-
-Main file:
-
-- `app/utils/seo_engine.py`
-
-The scoring engine has a defensive hard gate:
-
-```text
-If page_size_kb < 5.0, raise ValueError.
-```
-
-That means even if someone accidentally calls the scorer before validation, tiny placeholder pages cannot be scored.
-
-SEO categories:
-
-- on-page
-- technical
-- content
-- performance
-- security/mobile
-
-Performance scoring uses true streaming TTFB from `signals["ttfb"]`, not total download time.
-
-Score status:
-
-- `GOOD`: score >= 80
-- `FAIR`: score >= 60
-- `POOR`: score < 60
-
-### Step 6: Save SEO Log
-
-Valid SEO checks create an `SEOLog` with:
-
-- score
-- status
-- score breakdown
-- extracted signals
-- issues
-- recommendations
-- fetch metadata
-
-Invalid SEO checks create an `SEOLog` with:
-
-- no score
-- invalid status
-- fetch metadata
-- invalidation reason
-- HTML preview
-
-### Step 7: Update Site
-
-For valid SEO checks:
-
-- `site.seo_score` is updated
-- `site.seo_state` is updated
-- `site.last_seo_fetch_valid=True`
-- next SEO check is scheduled
-
-For invalid SEO checks:
-
-- `site.last_seo_fetch_valid=False`
-- the old SEO score is not replaced by a false POOR score
-- the dashboard displays an invalid-fetch warning
-
-## SSL Check Flow
-
-Main file:
-
-- `app/services/ssl_service.py`
-
-Flow:
-
-1. Celery task acquires the SSL lock.
-2. The service connects to the site's hostname on port 443.
-3. The certificate is inspected.
-4. Expiry date, issuer, and days remaining are calculated.
-5. An `SSLLog` row is created.
-6. The `Site` SSL fields are updated.
-7. The next SSL check is scheduled.
-8. SSL alert rules run for invalid certificates and expiry warnings.
-
-SSL states:
-
-- `VALID`
-- `EXPIRING`
-- `EXPIRED`
-- `ERROR`
-
-## HTTP Fetch Logic
-
-Main file:
-
-- `app/utils/http.py`
-
-All callers must pass an explicit timeout:
-
-```python
-fetch_url(url, timeout=5.0)
-```
-
-If timeout is `None`, `fetch_url()` raises `TypeError`.
-
-Timeouts by caller:
-
-- uptime: 5 seconds
-- SEO page fetch: 25 seconds
-- robots/sitemap HEAD checks: 8 seconds
-
-When `stream_for_ttfb=True`, TTFB is measured when the first response byte arrives, not after the full page downloads.
-
-Network errors and timeouts are retried with backoff:
-
-```text
-1 second
-2 seconds
-```
-
-HTTP 4xx/5xx responses are not retried as network errors because they are real server responses.
-
-## Celery Worker Flow
-
-Main file:
-
-- `app/workers/tasks.py`
-
-Each check task follows the same broad structure:
-
-1. Create Flask application context.
-2. Load the `Site`.
-3. Acquire a per-site/per-check lock.
-4. Mark the check as `running`.
-5. Run the service.
-6. Update status to `done` or `failed`.
-7. Refresh aggregate `app_status`.
-8. Release the lock in `finally`.
-
-Task names:
-
-```text
-tasks.run_uptime_check
-tasks.run_ssl_check
-tasks.run_seo_check
-tasks.run_due_uptime_checks
-tasks.run_due_ssl_checks
-tasks.run_due_seo_checks
-tasks.dispatch_due_checks
-tasks.run_zombie_rescue
-tasks.run_daily_summary
-tasks.run_retention_cycle
-```
-
-## Celery Beat Schedule
-
-Main file:
-
-- `app/config/settings.py`
-
-Current beat schedule:
-
-- uptime due-check dispatcher: every 30 seconds
-- SSL due-check dispatcher: every hour
-- SEO due-check dispatcher: every hour at minute 5
-- zombie rescue: every 5 minutes
-- daily summary: every day at 00:05 UTC
-- data retention: every day at 03:00 UTC
-
-Per-site intervals are still enforced by:
-
-- `next_uptime_check_at`
-- `next_ssl_check_at`
-- `next_seo_check_at`
-
-So even if Celery Beat wakes up every hour for SEO, each site only runs SEO when its own `next_seo_check_at` is due.
-
-## Zombie Rescue
-
-Main file:
-
-- `app/workers/tasks.py`
-
-Zombie rescue fixes checks stuck in `running`.
-
-Timeout thresholds:
-
-- uptime stuck over 10 minutes
-- SSL stuck over 30 minutes
-- SEO stuck over 90 minutes
-
-When rescued:
-
-- the check status becomes `failed`
-- the started timestamp is cleared
-- `app_status` is refreshed
-
-Zombie rescue is separate from data retention.
-
-## API Flow
-
-Main file:
-
-- `app/api/routes.py`
-
-### Site List
-
-```text
-GET /api/sites
-GET /api/sites?since=<ISO8601 datetime>
-```
-
-The `since` parameter supports delta polling. When supplied, only sites changed after that timestamp are returned.
-
-### Site Detail
-
-```text
-GET /api/sites/<site_id>
-```
-
-Includes:
-
-- site summary
-- latest uptime log
-- latest SSL log
-- latest SEO log
-- SEO fetch validation summary
-
-SEO response includes:
-
-```json
-{
-  "score": 76,
-  "state": "FAIR",
-  "last_fetch_valid": true,
-  "last_check_at": "2026-04-30T12:00:00+00:00",
-  "warning": null,
-  "latest_log": {}
-}
-```
-
-If the last SEO fetch was invalid, `warning` explains that the score may be inaccurate.
-
-### Manual Check
-
-```text
-POST /api/sites/<site_id>/check
-```
-
-Response includes:
-
-- uptime dispatch status
-- SSL dispatch status
-- SEO dispatch status
-- `cooldown_active`
-- `cooldown_reason`
-
-SEO may be skipped if cooldown is active.
-
-### Histories
-
-```text
-GET /api/sites/<site_id>/history/uptime?days=7
-GET /api/sites/<site_id>/history/ssl?limit=10
-GET /api/sites/<site_id>/history/seo?limit=5
-```
-
-SEO history includes fetch validation fields:
-
-- `fetch_valid`
-- `fetch_status`
-- `fetch_page_size_kb`
-- `invalidation_reason`
-- `fetch_html_preview`
-
-## Dashboard Flow
-
-Main files:
-
-- `app/templates/dashboard.html`
-- `app/templates/site_detail.html`
-- `app/static/dashboard.css`
-
-Dashboard behavior:
-
-1. The main dashboard lists all monitored sites.
-2. It shows uptime, SSL, SEO, and aggregate status.
-3. It polls `/api/sites?since=<timestamp>` every 3 seconds.
-4. Only changed sites are returned after the first poll.
-
-Site detail behavior:
-
-1. Shows operational health, latency, SSL, and SEO state.
-2. Shows SEO score only when the last SEO fetch was valid.
-3. Shows a warning banner when the last SEO fetch was invalid.
-4. Shows SEO history with page size, fetch validity, and invalidation notes.
-5. Allows manual SEO re-run after the site is fully online.
-
-## Alert Flow
-
-Main file:
-
-- `app/services/alert_service.py`
-
-Alerts supported:
-
-- downtime
-- recovery
-- SSL invalid/error
-- SSL expiry warning
-- SEO score regression
-
-Alert attempts are saved in `AlertHistory`.
-
-Per-site recipients are stored in `SiteNotification`.
-
-Email transport is handled by:
-
-- `app/services/email_service.py`
-
-## Scheduling Flow
-
-Main file:
-
-- `app/services/monitoring_service.py`
-
-Each check type has an independent interval and next-run timestamp.
-
-After a service finishes, it calls:
-
-```python
-schedule_next_run(site, check_type, checked_at)
-```
-
-That updates:
-
-- the check-specific last timestamp
-- the check-specific next timestamp
-- the aggregate `next_check_at`
-
-Due check dispatchers query sites whose next timestamp is due.
-
-## Data Retention And Summary Flow
-
-### Daily Summary
-
-Main file:
-
-- `app/services/summary_service.py`
-
-The daily summary task aggregates the previous UTC day from `UptimeLog` into `DailyUptimeSummary`.
-
-Stored summary data:
-
-- total checks
-- up/down/degraded counts
-- uptime percentage
-- average response time
-- average TTFB
-
-### Retention
-
-Main file:
-
-- `app/services/retention_service.py`
-
-Retention deletes old logs and history based on:
-
-```text
-LOG_RETENTION_DAYS
-```
-
-It cleans old:
-
-- uptime logs
-- SSL logs
-- SEO logs
-- incidents
-- alert history
-
-It does not delete daily uptime summaries.
+# WebMonitor — SaaS Website Monitoring & SEO Intelligence Platform
+
+A production-grade monitoring platform that continuously tracks **uptime**, **SSL certificate health**, and **SEO quality** for any number of websites. Built with Flask, Celery, Redis, and SQLAlchemy.
+
+---
+
+## Table of Contents
+
+1. [What It Does](#what-it-does)
+2. [Tech Stack](#tech-stack)
+3. [Project Structure](#project-structure)
+4. [Setup & Running](#setup--running)
+5. [Environment Variables](#environment-variables)
+6. [Architecture Overview](#architecture-overview)
+7. [Data Models](#data-models)
+8. [Check Flows — Step by Step](#check-flows--step-by-step)
+9. [SEO Scoring System](#seo-scoring-system)
+10. [Celery Tasks & Scheduling](#celery-tasks--scheduling)
+11. [Alert System](#alert-system)
+12. [API Reference](#api-reference)
+13. [Web UI](#web-ui)
+14. [State Machine](#state-machine)
+15. [Data Retention & Aggregation](#data-retention--aggregation)
+
+---
+
+## What It Does
+
+| Feature | Detail |
+|---|---|
+| Uptime monitoring | HTTP GET every 30–60 seconds, tracks status code, response time, TTFB |
+| SSL monitoring | Checks certificate validity and days-to-expiry via raw socket/TLS |
+| SEO auditing | Deep HTML scan with 30+ signals, 0–100 weighted score |
+| Alerting | Email on DOWN, RECOVERY, SSL expiry, SEO regression |
+| Incident tracking | Opens/resolves incident records on status transitions |
+| Daily summaries | Aggregates raw logs into daily rollups before deletion |
+| JSON export | Download full site report as structured JSON |
+| Real-time UI | Dashboard polls `/api/sites?since=` every 5 seconds |
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Web framework | Flask 3.0 |
+| ORM | SQLAlchemy 2.0 + Flask-SQLAlchemy 3.1 |
+| Task queue | Celery 5.3 + Redis |
+| HTTP client | HTTPX 0.26 (async-capable, streaming TTFB) |
+| HTML parsing | BeautifulSoup4 + lxml |
+| Database | SQLite (dev) / PostgreSQL (prod) |
+| Migrations | Alembic 1.18 |
+| CSRF protection | Flask-WTF 1.2 |
+| Templates | Jinja2 (server-side rendering) |
+| Styling | Custom CSS design system (dark theme, 8px grid) |
+| Testing | pytest 9.0 |
+
+---
 
 ## Project Structure
 
-```text
-app/
-  __init__.py                  Flask app factory
-  extensions.py                SQLAlchemy extension
-  api/
-    routes.py                  Dashboard routes and JSON API
-  config/
-    settings.py                Environment-backed config and Celery Beat schedule
-  models/
-    site.py                    Monitored website state
-    uptime_log.py              Uptime history
-    ssl_log.py                 SSL history
-    seo_log.py                 SEO history and fetch validation metadata
-    incident.py                Uptime incidents
-    alert_history.py           Alert records
-    site_notification.py       Per-site notification recipients
-    daily_uptime_summary.py    Daily uptime aggregates
-    daily_ssl_summary.py       SSL summary model
-    daily_seo_summary.py       SEO summary model
-    user.py                    User account model
-  services/
-    monitor_service.py         Uptime logic
-    ssl_service.py             SSL logic
-    seo_service.py             SEO validation, parsing, scoring orchestration
-    alert_service.py           Alert rules
-    email_service.py           SMTP delivery
-    monitoring_service.py      Scheduling helpers
-    retention_service.py       Cleanup jobs
-    summary_service.py         Daily summaries
-  utils/
-    http.py                    HTTP fetch, retry, timeout, TTFB logic
-    parser.py                  SEO signal extraction
-    seo_engine.py              SEO scoring
-    seo_validator.py           SEO fetch validation
-    time.py                    UTC helpers
-    urls.py                    URL normalization
-  workers/
-    tasks.py                   Celery tasks
-  templates/
-    dashboard.html
-    site_detail.html
-    base.html
-  static/
-    dashboard.css
-migrations/
-  env.py
-  versions/
-    20260430_add_seo_fetch_validation_fields.py
-run.py
-requirements.txt
+```
+.
+├── run.py                          # Entry point — creates and runs Flask app
+├── requirements.txt
+├── .env                            # Environment variables (never commit)
+├── alembic.ini
+│
+├── app/
+│   ├── __init__.py                 # App factory: create_app(), CSRF, DB init
+│   ├── extensions.py               # Shared db = SQLAlchemy() instance
+│   │
+│   ├── config/
+│   │   └── settings.py             # All config from env vars (Config class)
+│   │
+│   ├── models/
+│   │   ├── site.py                 # Core Site model — all check state lives here
+│   │   ├── user.py                 # User auth (email + bcrypt hash)
+│   │   ├── uptime_log.py           # One row per HTTP check
+│   │   ├── ssl_log.py              # One row per SSL check
+│   │   ├── seo_log.py              # One row per SEO audit (50+ columns)
+│   │   ├── incident.py             # Downtime incident open/resolve records
+│   │   ├── alert_history.py        # Every alert email sent, with delivery status
+│   │   ├── site_notification.py    # Email recipients per site
+│   │   ├── daily_uptime_summary.py # Daily rollup of uptime logs
+│   │   ├── daily_ssl_summary.py    # Daily rollup of SSL logs
+│   │   └── daily_seo_summary.py    # Daily rollup of SEO logs
+│   │
+│   ├── services/
+│   │   ├── monitoring_service.py   # Scheduling, interval math, due-site queries
+│   │   ├── monitor_service.py      # Uptime check execution
+│   │   ├── ssl_service.py          # SSL certificate fetch and validation
+│   │   ├── seo_service.py          # SEO audit orchestration + cooldown logic
+│   │   ├── alert_service.py        # Alert dispatch, incident management, cooldowns
+│   │   ├── email_service.py        # SMTP email sending
+│   │   ├── report_service.py       # JSON report generation
+│   │   ├── retention_service.py    # Log deletion with summary backfill
+│   │   └── summary_service.py      # Daily aggregation for all three check types
+│   │
+│   ├── utils/
+│   │   ├── http.py                 # fetch_url() with retry, streaming TTFB
+│   │   ├── parser.py               # HTML → 50+ SEO signals (BeautifulSoup)
+│   │   ├── seo_engine.py           # Weighted scoring algorithm (0–100)
+│   │   ├── seo_validator.py        # Detects placeholder/empty pages
+│   │   ├── time.py                 # now_utc(), normalize() UTC helpers
+│   │   └── urls.py                 # URL canonicalization and normalization
+│   │
+│   ├── workers/
+│   │   └── tasks.py                # All Celery tasks + lock management
+│   │
+│   ├── api/
+│   │   └── routes.py               # JSON API (api_bp) + Web routes (web_bp)
+│   │
+│   ├── templates/
+│   │   ├── base.html               # Layout shell: topbar, flash messages
+│   │   ├── dashboard.html          # Fleet overview page
+│   │   └── site_detail.html        # Per-site audit report page
+│   │
+│   └── static/
+│       └── dashboard.css           # Full design system (dark theme, components)
+│
+├── migrations/
+│   ├── env.py
+│   └── versions/                   # Alembic migration scripts
+│
+└── tests/
+    ├── test_seo_cooldown.py
+    ├── test_seo_guards.py
+    ├── test_seo_service.py
+    └── test_seo_validator.py
 ```
 
-## Configuration
+---
 
-Configuration is loaded from `.env` and `app/config/settings.py`.
+## Setup & Running
 
-Useful environment variables:
-
-```text
-SECRET_KEY=change-me
-FLASK_DEBUG=true
-DATABASE_URL=sqlite:///website_monitor.db
-REDIS_URL=redis://localhost:6379/0
-RESPONSE_TIME_THRESHOLD=3.0
-SSL_EXPIRY_WARNING_DAYS=7
-ALERT_COOLDOWN_MINUTES=15
-LOG_RETENTION_DAYS=30
-HTTP_VERIFY_SSL=true
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USERNAME=
-SMTP_PASSWORD=
-SMTP_USE_TLS=true
-SMTP_FROM_EMAIL=admin@example.com
-```
-
-## Setup
-
-Create and activate a virtual environment:
+### 1. Install dependencies
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate        # Windows
+source .venv/bin/activate     # Linux/Mac
 pip install -r requirements.txt
 ```
 
-Create `.env`:
+### 2. Configure environment
 
-```text
-SECRET_KEY=change-me
-DATABASE_URL=sqlite:///website_monitor.db
-REDIS_URL=redis://localhost:6379/0
-```
+Copy `.env.example` to `.env` and fill in values (see [Environment Variables](#environment-variables)).
 
-Apply migrations with Alembic:
+### 3. Start Redis
 
 ```bash
-python -m alembic upgrade head
+redis-server
 ```
 
-## Running Locally
-
-Start Flask:
+### 4. Run the Flask app
 
 ```bash
 python run.py
 ```
 
-Start Celery worker:
+The app creates all database tables automatically on first run via `db.create_all()`.
+
+### 5. Start Celery worker
 
 ```bash
-celery -A app.workers.tasks worker --loglevel=info -P solo
+celery -A app.workers.tasks.celery worker --loglevel=info
 ```
 
-Start Celery Beat:
+### 6. Start Celery Beat scheduler
 
 ```bash
-celery -A app.workers.tasks beat --loglevel=info
+celery -A app.workers.tasks.celery beat --loglevel=info
 ```
 
-Dashboard:
-
-```text
-http://127.0.0.1:5000/
-```
-
-## Tests
-
-Run tests:
+### 7. Run tests
 
 ```bash
-python -m pytest tests
+pytest tests/ -v
 ```
 
-Current SEO-focused tests cover:
+---
 
-- empty SEO fetch rejection
-- tiny placeholder page rejection
-- host placeholder detection
-- valid large page acceptance
-- HTTP error rejection
-- HTML preview truncation
-- timeout fetch status
-- SEO cooldown behavior
-- invalid fetch does not produce a score
-- explicit fetch timeout requirement
-- page-size hard gate in scorer
-- TTFB-based performance scoring
+## Environment Variables
 
-## Important Production Behavior
+All config lives in `app/config/settings.py` and is loaded from `.env` via `python-dotenv`.
 
-The most important SEO safety rule:
+| Variable | Default | Purpose |
+|---|---|---|
+| `SECRET_KEY` | `dev-secret-key` | Flask session signing |
+| `FLASK_DEBUG` | `false` | Enables debug mode and dev user |
+| `DATABASE_URL` | `sqlite:///website_monitor.db` | SQLAlchemy connection string |
+| `REDIS_URL` | `redis://localhost:6379/0` | Celery broker and result backend |
+| `RESPONSE_TIME_THRESHOLD` | `3.0` | Seconds above which uptime is DEGRADED |
+| `SSL_EXPIRY_WARNING_DAYS` | `7` | Days before expiry to start alerting |
+| `ALERT_COOLDOWN_MINUTES` | `15` | Minimum gap between repeat alerts |
+| `LOG_RETENTION_DAYS` | `30` | Days to keep raw logs before deletion |
+| `HTTP_VERIFY_SSL` | `true` | Whether to verify SSL on outbound requests |
+| `SMTP_HOST` | `` | SMTP server for email alerts |
+| `SMTP_PORT` | `587` | SMTP port |
+| `SMTP_USERNAME` | `` | SMTP auth username |
+| `SMTP_PASSWORD` | `` | SMTP auth password |
+| `SMTP_USE_TLS` | `true` | Enable STARTTLS |
+| `SMTP_FROM_EMAIL` | `ALERT_EMAIL` | From address for alert emails |
+| `ALERT_EMAIL` | `admin@example.com` | Fallback alert recipient |
+| `LOG_LEVEL` | `INFO` | Python logging level |
 
-```text
-Only valid fetched HTML is scored.
+---
+
+## Architecture Overview
+
+```
+Browser / API Client
+        │
+        ▼
+  Flask (routes.py)
+  ┌─────────────────────────────────────────┐
+  │  web_bp  →  dashboard.html             │
+  │             site_detail.html           │
+  │  api_bp  →  JSON responses             │
+  └─────────────────────────────────────────┘
+        │ .delay() / .apply_async()
+        ▼
+  Redis (broker)
+        │
+        ▼
+  Celery Worker (tasks.py)
+  ┌─────────────────────────────────────────┐
+  │  run_uptime_check_task                 │
+  │  run_ssl_check_task                    │
+  │  run_seo_check_task                    │
+  └─────────────────────────────────────────┘
+        │                    │
+        ▼                    ▼
+  monitor_service.py    ssl_service.py
+  seo_service.py
+        │
+        ▼
+  SQLAlchemy ORM → SQLite / PostgreSQL
+        │
+        ▼
+  alert_service.py → email_service.py → SMTP
 ```
 
-A tiny 0.83 KB placeholder page should produce:
+**Celery Beat** runs on a separate process and dispatches tasks on schedule:
 
-```json
-{
-  "fetch_valid": false,
-  "score": null,
-  "fetch_status": "invalid_content"
-}
+```
+Every 30s  → run_due_uptime_checks  → dispatches run_uptime_check_task per site
+Every 1h   → run_due_ssl_checks     → dispatches run_ssl_check_task per site
+Every 5m   → run_due_seo_checks     → dispatches run_seo_check_task per site
+Every 5m   → run_zombie_rescue      → resets stuck "running" tasks
+00:05 UTC  → run_daily_summary      → aggregates logs into daily summaries
+03:00 UTC  → run_retention_cycle    → deletes old logs (after backfilling summaries)
 ```
 
-It should not produce a false `POOR` score.
+---
 
-## Current Limitations
+## Data Models
 
-- Celery requires Redis.
-- SMTP must be configured before email alerts work.
-- SQLite is acceptable for local development; production should use PostgreSQL.
-- Some local development code still uses `db.create_all()` on app startup, while migrations are also present.
-- Dashboard authentication is session-based and lightweight.
-- The dashboard uses a local fallback user when no user is logged in.
+### Site
+
+The central model. Every check type writes its results back to the site row for fast dashboard reads.
+
+```
+sites
+├── id, user_id, name, url, normalized_url
+├── check_interval, uptime_check_interval, ssl_check_interval, seo_check_interval
+│
+├── Scheduling
+│   ├── next_uptime_check_at, next_ssl_check_at, next_seo_check_at
+│   ├── last_uptime_check_at, last_ssl_check_at, last_seo_check_at
+│   └── next_check_at  (min of the three above)
+│
+├── Aggregate Status
+│   ├── app_status       pending | checking | ready | partial
+│   ├── uptime_status    pending | running | done | failed
+│   ├── ssl_status       pending | running | done | failed
+│   └── seo_status       pending | running | done | failed
+│
+├── Uptime Metrics (denormalized from latest UptimeLog)
+│   ├── current_status   UP | DOWN | DEGRADED | PENDING
+│   ├── last_status_code, last_response_time, last_ttfb
+│   ├── last_error_message
+│   └── incident_opened_at, last_incident_resolved_at
+│
+├── SSL Metrics (denormalized from latest SSLLog)
+│   ├── ssl_state        VALID | EXPIRING | EXPIRED | ERROR | UNKNOWN
+│   ├── ssl_issuer, ssl_expiry_date, ssl_days_remaining
+│   └── ssl_last_error
+│
+└── SEO Metrics (denormalized from latest SEOLog)
+    ├── seo_state        GOOD | FAIR | POOR | UNKNOWN
+    ├── seo_score        0–100
+    ├── last_seo_fetch_valid
+    ├── last_downtime_ended_at  (used for cooldown logic)
+    └── seo_last_error
+```
+
+### UptimeLog
+
+One row per HTTP check. Stores raw result, never aggregated in place.
+
+```
+uptime_logs
+├── site_id, status_code, response_time (s), ttfb (s)
+├── is_up (bool), status (UP|DOWN|DEGRADED)
+├── error_message, checked_at
+```
+
+### SSLLog
+
+One row per SSL check.
+
+```
+ssl_logs
+├── site_id, expiry_date, days_remaining
+├── is_valid (bool), state (VALID|EXPIRING|EXPIRED|ERROR)
+├── issuer, error_message, checked_at
+```
+
+### SEOLog
+
+One row per SEO audit. Stores all 50+ signals plus the computed score.
+
+```
+seo_logs
+├── site_id, score (0–100), status (GOOD|FAIR|POOR|UNKNOWN)
+│
+├── On-Page: title, title_length, meta_description, meta_length
+│            h1_count, h2_count, h3_count, word_count, keyword_density
+│
+├── Content:  image_count, missing_alt_count
+│             internal_link_count, external_link_count
+│
+├── Technical: has_robots, has_sitemap, canonical, has_favicon
+│              has_hreflang, robots_meta, html_lang
+│
+├── Performance: page_size_kb, js_blocking_count, css_blocking_count, ttfb
+│
+├── Mobile/Security: has_viewport, mobile_friendly, https_redirect, mixed_content_count
+│
+├── Intelligence: score_breakdown (JSON), signals (JSON)
+│                 issues (JSON list), recommendations (JSON list)
+│
+└── Fetch Validation: fetch_valid, fetch_status, fetch_html_preview
+                      fetch_page_size_kb, invalidation_reason, error_message
+```
+
+### Incident
+
+Tracks downtime events. Opened when site transitions to DOWN, resolved on recovery.
+
+```
+incidents
+├── site_id, status (OPEN|RESOLVED)
+├── opened_at, resolved_at
+├── opened_status_code, opened_response_time, opened_error_message
+└── resolved_status_code, resolved_response_time, resolved_error_message
+```
+
+### AlertHistory
+
+Every alert email attempted, with delivery outcome.
+
+```
+alert_history
+├── site_id, incident_id (nullable)
+├── event_type  DOWN | RECOVERY | SSL_INVALID | SSL_EXPIRY_WARNING | SSL_EXPIRED | SEO_REGRESSION
+├── recipient, subject, body
+├── delivery_status  PENDING | SENT | FAILED
+└── error_message, sent_at
+```
+
+### Daily Summaries
+
+Three tables aggregate raw logs before deletion:
+
+```
+daily_uptime_summaries  → total_checks, up_checks, down_checks, degraded_checks,
+                          uptime_percentage, avg_response_time, avg_ttfb, outage_count
+
+daily_ssl_summaries     → total_checks, valid_count, avg_days_remaining
+
+daily_seo_summaries     → total_checks, avg_score, min_score, max_score
+```
+
+---
+
+## Check Flows — Step by Step
+
+### Uptime Check Flow
+
+```
+Celery Beat (every 30s)
+  └─ run_due_uptime_checks()
+       └─ get_due_site_ids("uptime")   ← sites where next_uptime_check_at <= now
+            └─ run_uptime_check_task.delay(site_id)
+                 │
+                 ├─ acquire_check_lock(site_id, "uptime")
+                 │    └─ UPDATE sites SET uptime_status="running" WHERE uptime_status != "running"
+                 │         returns False if already running (prevents duplicates)
+                 │
+                 ├─ monitor_service.run_uptime_check(site_id)
+                 │    ├─ fetch_url(site.url, timeout=5.0)
+                 │    │    ├─ GET request with up to 2 retries (1s, 2s delays)
+                 │    │    └─ returns {status_code, response_time, ttfb, is_up, error}
+                 │    │
+                 │    ├─ Determine status:
+                 │    │    is_up=False          → DOWN
+                 │    │    response_time > 3.0s → DEGRADED
+                 │    │    else                 → UP
+                 │    │
+                 │    ├─ Write UptimeLog row
+                 │    ├─ Update site.current_status, last_response_time, last_ttfb
+                 │    ├─ schedule_next_run(site, "uptime", checked_at)
+                 │    │    └─ site.next_uptime_check_at = checked_at + uptime_check_interval
+                 │    │
+                 │    ├─ If DOWN→UP transition: set site.last_downtime_ended_at = now
+                 │    │    (activates 120s SEO cooldown)
+                 │    │
+                 │    └─ alert_service.handle_uptime_transition(...)
+                 │         ├─ DOWN transition  → _open_incident() + notify recipients
+                 │         └─ UP transition    → _resolve_incident() + notify recipients
+                 │
+                 └─ release_check_lock(site, "uptime")
+                      └─ site.refresh_app_status()
+```
+
+### SSL Check Flow
+
+```
+Celery Beat (every hour, at :00)
+  └─ run_due_ssl_checks()
+       └─ run_ssl_check_task.delay(site_id)
+            │
+            ├─ acquire_check_lock(site_id, "ssl")
+            │
+            ├─ ssl_service.run_ssl_check(site_id)
+            │    ├─ _extract_hostname(site.url)  ← urlparse().hostname
+            │    ├─ _fetch_certificate(hostname)
+            │    │    ├─ socket.create_connection((hostname, 443), timeout=10)
+            │    │    ├─ ssl.wrap_socket() → getpeercert()
+            │    │    ├─ Parse notAfter → expiry_date (UTC-aware)
+            │    │    └─ Extract issuer organizationName
+            │    │
+            │    ├─ days_remaining = (expiry - now).days
+            │    ├─ state = VALID | EXPIRING (<14d) | EXPIRED (<0d) | ERROR
+            │    ├─ Write SSLLog row
+            │    ├─ Update site.ssl_state, ssl_days_remaining, ssl_expiry_date, ssl_issuer
+            │    ├─ schedule_next_run(site, "ssl", checked_at)
+            │    │
+            │    └─ alert_service.check_ssl_alerts(...)
+            │         ├─ is_valid=False → SSL_INVALID alert (immediate)
+            │         └─ days_remaining <= SSL_EXPIRY_WARNING_DAYS
+            │              → SSL_EXPIRY_WARNING or SSL_EXPIRED
+            │                (both rate-limited to once per day)
+            │
+            └─ release_check_lock(site, "ssl")
+```
+
+### SEO Check Flow
+
+```
+Celery Beat (every 5 min, at :05)
+  └─ run_due_seo_checks()
+       └─ run_seo_check_task.delay(site_id)
+            │
+            ├─ should_skip_seo_for_cooldown(site)
+            │    └─ If site recovered from DOWN < 120s ago → reschedule +120s, return early
+            │         (prevents false POOR scores from cold-start placeholder pages)
+            │
+            ├─ acquire_check_lock(site_id, "seo")
+            │
+            └─ seo_service.run_seo_check(site, db.session)
+                 │
+                 ├─ fetch_url(site.url, timeout=25.0, stream_for_ttfb=True)
+                 │    └─ Streaming GET: captures TTFB when first byte arrives
+                 │
+                 ├─ validate_seo_fetch(html, page_size_kb, status_code, error, url)
+                 │    Checks (in order):
+                 │    1. Fetch error with no HTML → fetch_status="error"
+                 │    2. Empty response           → fetch_status="empty"
+                 │    3. Page < 5 KB              → fetch_status="invalid_content"
+                 │    4. HTTP status >= 400        → fetch_status="error"
+                 │    5. Known placeholder text    → fetch_status="invalid_content"
+                 │       (nginx default, "Account suspended", "Coming Soon", etc.)
+                 │    If invalid → save SEOLog with fetch_valid=False, NO score
+                 │
+                 ├─ parse_seo_intelligence(html, site.url)
+                 │    Extracts 50+ signals via BeautifulSoup:
+                 │    title, meta description, H1–H6 counts, word count,
+                 │    images/alt text, internal/external links, canonical,
+                 │    robots.txt presence, sitemap.xml presence, viewport,
+                 │    HTTPS redirect, mixed content, blocking JS/CSS, lang attr
+                 │
+                 ├─ _check_resource_exists(url, "/robots.txt")  ← HEAD request
+                 ├─ _check_resource_exists(url, "/sitemap.xml") ← HEAD request
+                 │
+                 ├─ analyze_seo(signals)  ← scoring engine
+                 │    (see SEO Scoring System section)
+                 │
+                 ├─ Capture old_score = site.seo_score  ← BEFORE updating
+                 ├─ Save SEOLog row
+                 ├─ Update site.seo_score, seo_state, last_seo_fetch_valid
+                 ├─ schedule_next_run(site, "seo", checked_at)
+                 │
+                 └─ alert_service.check_seo_alerts(site, score, status, old_score=old_score)
+                      └─ If score < old_score - 5 → SEO_REGRESSION alert
+```
+
+---
+
+## SEO Scoring System
+
+Each category is scored **0–100 internally**, then multiplied by its weight to contribute to the final score.
+
+```
+Final Score = (on_page × 0.40) + (technical × 0.25) + (content × 0.15)
+            + (performance × 0.10) + (security_mobile × 0.10)
+```
+
+### On-Page (weight: 40%)
+
+| Signal | Points |
+|---|---|
+| Title tag present | +20 |
+| Title length 50–60 chars | +20 |
+| Meta description present | +20 |
+| Meta description 120–160 chars | +20 |
+| Exactly one H1 tag | +20 |
+| **Max** | **100** |
+
+### Technical (weight: 25%)
+
+| Signal | Points |
+|---|---|
+| robots.txt accessible | +25 |
+| sitemap.xml accessible | +25 |
+| Canonical URL set | +25 |
+| HTML lang attribute set | +15 |
+| No noindex in robots meta | +10 |
+| **Max** | **100** |
+
+### Content (weight: 15%)
+
+| Signal | Points |
+|---|---|
+| Word count ≥ 300 | +40 |
+| Logical heading hierarchy | +30 |
+| Alt text coverage (proportional) | 0–30 |
+| **Max** | **100** |
+
+### Performance (weight: 10%)
+
+| Signal | Points |
+|---|---|
+| TTFB < 0.8s | +50 |
+| TTFB < 1.5s | +30 |
+| Page size < 500 KB | +30 |
+| Page size < 1000 KB | +15 |
+| Zero blocking JS/CSS in `<head>` | +20 |
+| ≤ 2 blocking resources | +10 |
+| **Max** | **100** |
+
+### Security + Mobile (weight: 10%)
+
+| Signal | Points |
+|---|---|
+| HTTPS redirect enforced | +40 |
+| Viewport meta tag present | +40 |
+| No mixed HTTP content | +20 |
+| **Max** | **100** |
+
+### Score Grades
+
+| Score | Grade | Status |
+|---|---|---|
+| 80–100 | Good | `GOOD` |
+| 60–79 | Fair | `FAIR` |
+| 0–59 | Poor | `POOR` |
+
+### Fetch Validation
+
+Before scoring, the fetched HTML is validated. If any check fails, `fetch_valid=False` is stored and **no score is generated**:
+
+| Rule | Condition | fetch_status |
+|---|---|---|
+| Fetch error | Network/timeout error with no HTML | `error` / `timeout` |
+| Empty response | HTML is empty or whitespace | `empty` |
+| Page too small | Page < 5 KB | `invalid_content` |
+| HTTP error | Status code ≥ 400 | `error` |
+| Placeholder page | Matches known signatures (nginx default, "Account suspended", etc.) | `invalid_content` |
+
+---
+
+## Celery Tasks & Scheduling
+
+### Beat Schedule
+
+| Task | Schedule | Purpose |
+|---|---|---|
+| `run_due_uptime_checks` | Every 30s | Dispatch uptime checks for all due sites |
+| `run_due_ssl_checks` | Every hour (:00) | Dispatch SSL checks for all due sites |
+| `run_due_seo_checks` | Every hour (:05) | Dispatch SEO checks for all due sites |
+| `run_zombie_rescue` | Every 5 min | Reset tasks stuck in "running" state |
+| `run_daily_summary` | 00:05 UTC | Aggregate logs into daily summary tables |
+| `run_retention_cycle` | 03:00 UTC | Delete old logs (after backfilling summaries) |
+
+### Concurrency Lock
+
+Every check task uses a database-level lock to prevent duplicate execution:
+
+```python
+acquire_check_lock(site_id, check_type)
+  → UPDATE sites SET {type}_status="running"
+    WHERE id=site_id AND {type}_status != "running"
+  → Returns True only if exactly 1 row was updated
+```
+
+If the lock returns False (task already running), the new task exits immediately.
+
+### Zombie Rescue
+
+Tasks that get stuck in "running" are automatically reset:
+
+| Check type | Timeout |
+|---|---|
+| Uptime | 10 minutes |
+| SSL | 30 minutes |
+| SEO | 90 minutes |
+
+---
+
+## Alert System
+
+### Event Types
+
+| Event | Trigger | Cooldown |
+|---|---|---|
+| `DOWN` | Site transitions from UP/DEGRADED to DOWN | Per-incident cooldown (15 min default) |
+| `RECOVERY` | Site transitions from DOWN to UP/DEGRADED | Per-incident cooldown |
+| `SSL_INVALID` | Certificate cannot be fetched or is invalid | Per-incident cooldown |
+| `SSL_EXPIRY_WARNING` | Days remaining ≤ `SSL_EXPIRY_WARNING_DAYS` | Once per day |
+| `SSL_EXPIRED` | Days remaining < 0 | Once per day |
+| `SEO_REGRESSION` | Score drops > 5 points from previous valid scan | Per-incident cooldown |
+
+### Alert Flow
+
+```
+alert_service.check_ssl_alerts() / handle_uptime_transition() / check_seo_alerts()
+  │
+  ├─ _send_alert()          ← logs to stdout (swap for SendGrid/Slack/PagerDuty)
+  │
+  └─ _notify_site()
+       ├─ Query SiteNotification for active recipients
+       ├─ Check _cooldown_active() — skip if alert sent recently
+       ├─ Create AlertHistory row (PENDING)
+       ├─ send_email(recipient, subject, body)
+       └─ Update AlertHistory → SENT or FAILED
+```
+
+---
+
+## API Reference
+
+All JSON API routes are under `/api/`. CSRF is exempted for the API blueprint (uses session auth). Web form routes require a CSRF token.
+
+### Authentication
+
+| Method | Route | Body | Response |
+|---|---|---|---|
+| POST | `/api/auth/register` | `{email, password}` | `{message, user}` 201 |
+| POST | `/api/auth/login` | `{email, password}` | `{message, user}` 200 |
+| POST | `/api/auth/logout` | — | `{message}` 200 |
+
+### Sites
+
+| Method | Route | Description |
+|---|---|---|
+| POST | `/api/sites` | Add a site. Body: `{url, name?, check_interval?, uptime_check_interval?, ssl_check_interval?, seo_check_interval?, notification_emails?}` |
+| GET | `/api/sites` | List all sites for current user. Query: `?since=<ISO8601>` for delta polling |
+| GET | `/api/sites/<id>` | Get site with latest logs |
+| DELETE | `/api/sites/<id>` | Delete site and all associated data |
+| POST | `/api/sites/<id>/check` | Trigger all three checks immediately |
+
+### History & Logs
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/sites/<id>/history/uptime` | Uptime logs. Query: `?days=7` |
+| GET | `/api/sites/<id>/history/ssl` | SSL logs. Query: `?limit=10` |
+| GET | `/api/sites/<id>/history/seo` | SEO logs. Query: `?limit=5` |
+| GET | `/api/sites/<id>/uptime-summary` | Daily uptime summaries. Query: `?days=30` |
+| GET | `/api/logs/<id>` | Last 10 uptime logs |
+| GET | `/api/seo-logs/<id>` | Last 10 SEO logs |
+| GET | `/api/site/<id>/status` | Current site status dict |
+
+### Manual Check Triggers
+
+| Method | Route | Description |
+|---|---|---|
+| GET | `/api/check/<id>` | Queue uptime check |
+| GET | `/api/check-ssl/<id>` | Queue SSL check |
+| GET | `/api/check-seo/<id>` | Queue SEO check (respects cooldown) |
+
+---
+
+## Web UI
+
+### Dashboard (`GET /`)
+
+Rendered by `dashboard.html`. Data passed from `web.dashboard` route:
+
+- `metrics` — `{monitored_sites, sites_up, sites_down, avg_response, health_score}`
+- `site_cards` — all Site objects for current user
+- `recent_uptime_logs` — last 12 uptime logs across all sites
+- `recent_ssl_logs` — last 8 SSL logs
+- `recent_seo_logs` — last 8 SEO logs
+
+**Sections:**
+1. Global status bar — fleet health %, status label, avg latency
+2. Metric cards — Fleet Uptime, SSL Health, Avg SEO Score, Avg Latency
+3. Active Issues panel — only shown when sites are DOWN or SSL expiring
+4. Site cards grid — per-site mini-dashboard with 4 metrics
+5. Add Monitor form — creates site and immediately queues all three checks
+6. Intelligence Feed — recent anomalies (failed uptime checks)
+
+The page polls `/api/sites?since=<timestamp>` every 5 seconds and reloads if any site was updated.
+
+### Site Detail (`GET /site/<id>`)
+
+Rendered by `site_detail.html`. Data passed:
+
+- `site` — Site object
+- `uptime_logs` — last 20 uptime logs
+- `ssl_logs` — last 10 SSL logs
+- `seo_logs` — last 10 SEO logs (first entry used as `report`)
+
+**Sections:**
+1. Detail header — site name, status pill, Export JSON and Run Full Audit buttons
+2. Metric cards — Uptime Status, Response Time, SSL Certificate, SEO Score
+3. Invalid fetch alert — shown when `fetch_valid=False`
+4. Intelligence Breakdown card with 4 tabs:
+   - **On-Page** — title, meta description, H1 count, heading structure, keywords
+   - **Technical** — canonical, robots.txt, sitemap.xml, robots meta, lang, favicon, hreflang
+   - **Content** — word count, images/alt text, internal/external links
+   - **Perf & Mobile** — TTFB, page size, blocking resources, viewport, HTTPS, mixed content
+5. Score bar + 5 category tiles (each shows raw score/100 and contribution to final score)
+6. SEO scan history table
+7. Sidebar: Top Fixes, Raw Signals, SSL Details, Uptime log mini-timeline
+
+---
+
+## State Machine
+
+### app_status
+
+```
+                    ┌─────────────────────────────────────┐
+                    │                                     │
+  Site created  →  pending  →  checking  →  ready        │
+                                    │                     │
+                                    └──→  partial  ───────┘
+                                         (any failed)
+```
+
+`refresh_app_status()` is called after every check completes:
+
+| Condition | app_status |
+|---|---|
+| All three statuses are "pending" | `pending` |
+| Any status is "running" | `checking` |
+| All three are "done" | `ready` |
+| Any is "failed" | `partial` |
+| Mixed pending/done | `partial` |
+
+### current_status (uptime)
+
+```
+PENDING → UP (first successful check)
+UP      → DOWN (HTTP error or non-2xx/3xx)
+UP      → DEGRADED (response_time > RESPONSE_TIME_THRESHOLD)
+DOWN    → UP (successful check after downtime)
+DEGRADED → UP (response time back below threshold)
+```
+
+### ssl_state
+
+```
+UNKNOWN → VALID (cert fetched, days_remaining >= 14)
+VALID   → EXPIRING (days_remaining < 14)
+EXPIRING → EXPIRED (days_remaining < 0)
+any     → ERROR (socket/SSL exception)
+```
+
+---
+
+## Data Retention & Aggregation
+
+The retention cycle runs daily at 03:00 UTC:
+
+```
+run_retention_cycle()
+  │
+  ├─ cutoff = now - LOG_RETENTION_DAYS (default 30 days)
+  │
+  ├─ _backfill_summaries_before_cutoff(cutoff.date())
+  │    ├─ _populate_daily_uptime_summary(date)
+  │    │    └─ Aggregates UptimeLog → DailyUptimeSummary
+  │    │       (total, up, down, degraded counts, avg response time, avg TTFB)
+  │    ├─ _populate_daily_ssl_summary(date)
+  │    │    └─ Aggregates SSLLog → DailySSLSummary
+  │    │       (total checks, valid count, avg days remaining)
+  │    └─ _populate_daily_seo_summary(date)
+  │         └─ Aggregates SEOLog (fetch_valid=True only) → DailySEOSummary
+  │            (total checks, avg/min/max score)
+  │
+  └─ DELETE UptimeLog, SSLLog, SEOLog, Incidents, AlertHistory WHERE checked_at < cutoff
+```
+
+The daily summary task also runs independently at 00:05 UTC to build summaries for the previous day, ensuring data is available even if retention hasn't run yet.
+
+---
+
+## Design System
+
+`app/static/dashboard.css` implements a complete design system:
+
+**Color palette:**
+- `--green: #22c55e` — healthy, passing, good
+- `--yellow: #f59e0b` — warning, moderate, expiring
+- `--red: #ef4444` — critical, failing, down
+- `--blue: #3b82f6` — informational, running, links
+- `--bg: #080e1a` — page background
+- `--surface: #0d1526` — card background
+- `--surface-2: #111d30` — nested elements
+- `--surface-3: #162038` — inputs, mini-tiles
+
+**Component classes:**
+- `.btn`, `.btn-primary`, `.btn-secondary`, `.btn-ghost`, `.btn-sm`
+- `.card`, `.card-sm`, `.card-lg`
+- `.pill`, `.pill-green`, `.pill-yellow`, `.pill-red`, `.pill-blue`, `.pill-gray`
+- `.dot`, `.dot-green`, `.dot-yellow`, `.dot-red`
+- `.val-green`, `.val-yellow`, `.val-red`, `.val-muted`, `.val-blue`
+- `.label`, `.muted`, `.small`, `.mono`, `.truncate`
+- `.spinner` (CSS animation)
+- `.score-tile`, `.bar-fill`, `.signal-row`, `.audit-item`, `.rec-item`
+- `.tabs-nav`, `.tab-btn`, `.tab-content`

@@ -8,8 +8,14 @@ send_alert() internals with SendGrid / Twilio / PagerDuty etc.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+
 from app.config.settings import Config
+from app.extensions import db
+from app.models.alert_history import AlertHistory
+from app.models.incident import Incident
+from app.models.site_notification import SiteNotification
+from app.services.email_service import send_email
 from app.utils.time import now_utc
 
 logger = logging.getLogger(__name__)
@@ -68,7 +74,8 @@ def check_ssl_alerts(site, is_valid: bool,
 
     if days_remaining is not None and days_remaining <= Config.SSL_EXPIRY_WARNING_DAYS:
         event_type = "SSL_EXPIRED" if days_remaining < 0 else "SSL_EXPIRY_WARNING"
-        if event_type == "SSL_EXPIRY_WARNING" and _daily_alert_sent(site.id, event_type, checked_at):
+        # Both EXPIRED and EXPIRY_WARNING are rate-limited to once per day.
+        if _daily_alert_sent(site.id, event_type, checked_at):
             return
         _send_alert(
             level="WARNING",
@@ -83,30 +90,36 @@ def check_ssl_alerts(site, is_valid: bool,
         _notify_site(site, None, event_type, checked_at, days_remaining=days_remaining)
 
 
-def check_seo_alerts(site, score: int, status: str, checked_at: datetime) -> None:
-    """Notify only on SEO regression when a previous baseline exists."""
-    from app.models.seo_log import SEOLog
-
-    with db.session.no_autoflush:
-        previous = (
-            SEOLog.query
-            .filter(SEOLog.site_id == site.id)
-            .filter(SEOLog.checked_at < checked_at)
-            .order_by(SEOLog.checked_at.desc())
-            .first()
-        )
-
-    if previous is None:
-        logger.debug("Skipping SEO regression alert for site %s: no previous SEOLog baseline", site.id)
+def check_seo_alerts(site, score: int, status: str, checked_at: datetime,
+                     old_score: int | None = None) -> None:
+    """Notify on SEO regression. Uses old_score passed from the caller to avoid
+    comparing the new score against itself after the log has been saved."""
+    if old_score is None:
+        logger.debug("Skipping SEO regression alert for site %s: no previous score baseline", site.id)
         return
 
-    if score < previous.score - 5:
+    if score is not None and score < old_score - 5:
         _send_alert(
             level="WARNING",
-            subject=f"[SEO REGRESSION] {site.url} dropped from {previous.score} to {score}",
-            body=f"Website: {site.url}\nPrevious score: {previous.score}\nCurrent score: {score}\nStatus: {status}\nTime: {checked_at.isoformat()}",
+            subject=f"[SEO REGRESSION] {site.url} dropped from {old_score} to {score}",
+            body=f"Website: {site.url}\nPrevious score: {old_score}\nCurrent score: {score}\nStatus: {status}\nTime: {checked_at.isoformat()}",
         )
         _notify_site(site, None, "SEO_REGRESSION", checked_at, seo_score=score)
+
+
+def handle_uptime_transition(site, previous_status: str | None, current_status: str,
+                             status_code: int | None, response_time: float | None,
+                             error_message: str | None, checked_at: datetime) -> None:
+    previous_status = previous_status or "PENDING"
+
+    if current_status == "DOWN" and previous_status != "DOWN":
+        incident = _open_incident(site, status_code, response_time, error_message, checked_at)
+        _notify_site(site, incident, "DOWN", checked_at, status_code, response_time, error_message)
+        return
+
+    if previous_status == "DOWN" and current_status != "DOWN":
+        incident = _resolve_incident(site, status_code, response_time, error_message, checked_at)
+        _notify_site(site, incident, "RECOVERY", checked_at, status_code, response_time, error_message)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,30 +144,6 @@ def _send_alert(level: str, subject: str, body: str) -> None:
         f"{separator}\n"
     )
     logger.warning("ALERT [%s] %s", level, subject)
-
-
-from datetime import timedelta
-
-from app.extensions import db
-from app.models.alert_history import AlertHistory
-from app.models.incident import Incident
-from app.models.site_notification import SiteNotification
-from app.services.email_service import send_email
-
-
-def handle_uptime_transition(site, previous_status: str | None, current_status: str,
-                             status_code: int | None, response_time: float | None,
-                             error_message: str | None, checked_at: datetime) -> None:
-    previous_status = previous_status or "PENDING"
-
-    if current_status == "DOWN" and previous_status != "DOWN":
-        incident = _open_incident(site, status_code, response_time, error_message, checked_at)
-        _notify_site(site, incident, "DOWN", checked_at, status_code, response_time, error_message)
-        return
-
-    if previous_status == "DOWN" and current_status != "DOWN":
-        incident = _resolve_incident(site, status_code, response_time, error_message, checked_at)
-        _notify_site(site, incident, "RECOVERY", checked_at, status_code, response_time, error_message)
 
 
 def _open_incident(site, status_code, response_time, error_message, checked_at):
@@ -292,8 +281,8 @@ def _build_subject(site_name: str, event_type: str) -> str:
 
 
 def _build_body(site, event_type: str, checked_at: datetime, status_code: int | None,
-                 response_time: float | None, error_message: str | None,
-                 days_remaining: int | None = None, seo_score: int | None = None) -> str:
+                response_time: float | None, error_message: str | None,
+                days_remaining: int | None = None, seo_score: int | None = None) -> str:
     body = (
         f"Site name: {site.display_name()}\n"
         f"URL: {site.url}\n"
@@ -304,10 +293,10 @@ def _build_body(site, event_type: str, checked_at: datetime, status_code: int | 
     if event_type in ["DOWN", "RECOVERY"]:
         body += f"Status code: {status_code if status_code is not None else 'N/A'}\n"
         body += f"Response time: {f'{response_time:.2f}s' if response_time is not None else 'N/A'}\n"
-    
+
     if event_type in ["SSL_EXPIRING", "SSL_EXPIRY_WARNING", "SSL_EXPIRED"]:
         body += f"Days remaining: {days_remaining}\n"
-    
+
     if event_type in ["SEO_CRITICAL", "SEO_WARNING", "SEO_REGRESSION"]:
         body += f"SEO Score: {seo_score}\n"
 

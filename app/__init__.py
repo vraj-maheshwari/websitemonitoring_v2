@@ -3,11 +3,14 @@ import sqlite3
 from urllib.parse import unquote
 
 from flask import Flask
+from flask_wtf.csrf import CSRFProtect
 from sqlalchemy.exc import OperationalError
 from app.extensions import db
 from app.config.settings import Config
 from app.models.site import Site
 from app.services.monitoring_service import prepare_site
+
+csrf = CSRFProtect()
 
 def create_app():
     flask_app = Flask(__name__)   # ✅ NEVER use name 'app' here
@@ -16,6 +19,7 @@ def create_app():
     _fallback_sqlite_if_unusable(flask_app)
 
     db.init_app(flask_app)
+    csrf.init_app(flask_app)
 
     # ✅ load models
     with flask_app.app_context():

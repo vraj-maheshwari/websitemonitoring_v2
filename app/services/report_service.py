@@ -6,6 +6,7 @@ Report generation for site monitoring data.
 
 import json
 from datetime import datetime
+from app.extensions import db
 from app.models.site import Site
 from app.models.uptime_log import UptimeLog
 from app.models.ssl_log import SSLLog
@@ -16,7 +17,7 @@ def generate_site_report(site_id: int) -> dict:
     """
     Generate a comprehensive report for a site including all monitoring data.
     """
-    site = Site.query.get(site_id)
+    site = db.session.get(Site, site_id)
     if not site:
         return None
 

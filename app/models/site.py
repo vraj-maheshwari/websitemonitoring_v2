@@ -118,10 +118,14 @@ class Site(db.Model):
 
         self.is_processing = any(s == "running" for s in statuses)
 
+        # Guard: all pending means the site was just created — keep it "pending",
+        # not "partial", so the UI doesn't show a warning state during init.
+        if all(s == "pending" for s in statuses):
+            self.app_status = "pending"
+            return
+
         if any(s == "running" for s in statuses):
             self.app_status = "checking"
-        elif all(s == "pending" for s in statuses):
-            self.app_status = "pending"
         elif all(s == "done" for s in statuses):
             self.app_status = "ready"
         elif any(s == "failed" for s in statuses):

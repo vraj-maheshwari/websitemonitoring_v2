@@ -68,6 +68,9 @@ def fetch_url(url: str, timeout: float, stream_for_ttfb: bool = False, max_bytes
         except Exception as exc:
             return _make_error_result(str(exc))
 
+    # Safety fallback: all retries exhausted without returning a result.
+    return _make_error_result("All retries exhausted without a result")
+
 
 def _fetch_streaming_ttfb(url: str, timeout: float, max_bytes: int | None = None) -> dict:
     start = time.perf_counter()

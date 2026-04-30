@@ -34,9 +34,9 @@ def acquire_check_lock(site_id: int, check_type: str) -> bool:
         .update({
             f"{check_type}_status": "running",
             started_name: now_utc(),
-            Site.last_started_at: now_utc(),
-            Site.app_status: "checking",
-            Site.is_processing: True,
+            "last_started_at": now_utc(),
+            "app_status": "checking",
+            "is_processing": True,
         }, synchronize_session=False)
     )
     db.session.commit()
@@ -105,25 +105,25 @@ def run_seo_check_task(self, site_id: int):
     app = create_app()
     with app.app_context():
         site = db.session.get(Site, site_id)
-        if not site: return "Site not found"
+        if not site:
+            return "Site not found"
+
+        # Sub-fix A: check cooldown BEFORE acquiring the lock so we never
+        # set seo_status="running" and then immediately override it to "pending".
+        should_skip, reason = should_skip_seo_for_cooldown(site)
+        if should_skip:
+            logger.info("[SEO TASK] site_id=%s cooldown active, rescheduling. Reason: %s", site_id, reason)
+            run_seo_check_task.apply_async(args=[site_id], countdown=120)
+            return "Cooldown active"
 
         if not acquire_check_lock(site_id, "seo"):
             return "Already running"
 
         try:
-            should_skip, reason = should_skip_seo_for_cooldown(site)
-            if should_skip:
-                logger.info("[SEO TASK] site_id=%s cooldown active, rescheduling. Reason: %s", site_id, reason)
-                run_seo_check_task.apply_async(args=[site_id], countdown=120)
-                site.seo_status = "pending"
-                db.session.commit()
-                return "Cooldown active"
-
-            site.seo_status = "running"
-            site.last_seo_check_at = now_utc()
-            db.session.commit()
-
+            # Sub-fix B: acquire_check_lock already set seo_status="running" via
+            # bulk UPDATE — do NOT set it again here.
             result = run_seo_service(site, db.session)
+            site = db.session.get(Site, site_id)  # re-fetch after service commits
             site.seo_status = "done" if result and not result.get("error_message") else "failed"
             if result and result.get("fetch_valid") is False:
                 site.seo_status = "done"

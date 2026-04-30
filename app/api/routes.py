@@ -1,3 +1,4 @@
+import re
 from collections import Counter
 from statistics import mean
 
@@ -30,6 +31,11 @@ from app.workers.tasks import run_seo_check_task, run_ssl_check_task, run_uptime
 api_bp = Blueprint("api", __name__)
 web_bp = Blueprint("web", __name__)
 logger = logging.getLogger(__name__)
+
+# Exempt the JSON API blueprint from CSRF — it uses session auth, not form tokens.
+# Web form routes (web_bp) remain CSRF-protected.
+from app import csrf
+csrf.exempt(api_bp)
 
 
 @api_bp.route("/auth/register", methods=["POST"])
@@ -108,8 +114,10 @@ def add_site():
 
     for email in emails:
         recipient = (email or "").strip()
-        if recipient:
+        if recipient and _is_valid_email(recipient):
             db.session.add(SiteNotification(site_id=site.id, email=recipient, is_active=True))
+        elif recipient:
+            logger.warning("Skipping invalid notification email for site %s: %s", site.id, recipient)
     
     # SaaS State Initialization
     site.app_status = "checking"
@@ -406,7 +414,10 @@ def create_site():
         return redirect(url_for("web.dashboard"))
 
     for recipient in _parse_notification_emails(emails_raw):
-        db.session.add(SiteNotification(site_id=site.id, email=recipient, is_active=True))
+        if _is_valid_email(recipient):
+            db.session.add(SiteNotification(site_id=site.id, email=recipient, is_active=True))
+        else:
+            logger.warning("Skipping invalid notification email for site %s: %s", site.id, recipient)
     
     # SaaS Initialization
     site.app_status = "checking"
@@ -523,6 +534,9 @@ def _effective_user_id() -> int:
 
 
 def _local_user_id() -> int:
+    from flask import current_app
+    if not current_app.debug:
+        abort(401)
     user = User.query.filter_by(email="local@website-monitor.internal").first()
     if user is None:
         user = User(email="local@website-monitor.internal", password_hash="local-development-user")
@@ -531,7 +545,11 @@ def _local_user_id() -> int:
     return user.id
 
 
-def _parse_interval(value, default: int, minimum: int) -> int:
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+def _is_valid_email(email: str) -> bool:
+    return bool(_EMAIL_RE.fullmatch(email.strip()))
     if value in (None, ""):
         value = default
     try:
