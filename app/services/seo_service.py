@@ -16,6 +16,7 @@ from app.models.site import Site
 from app.services import alert_service
 from app.services.monitoring_service import CHECK_SEO, schedule_next_run
 from app.utils.http import fetch_url
+from app.utils.hybrid_fetch import fetch_html_for_seo
 from app.utils.parser import parse_seo_intelligence
 from app.utils.seo_engine import analyze_seo
 from app.utils.seo_validator import validate_seo_fetch
@@ -23,6 +24,7 @@ from app.utils.time import now_utc
 from app.utils.tech_profiler import detect_technologies, diff_tech_stacks
 from app.utils.cwv_estimator import estimate_cwv, cwv_to_dict
 from app.utils.broken_link_checker import extract_all_links, check_broken_links, broken_link_report_to_dict
+from app.services.security_service import run_security_audit
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +92,7 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
         return result
 
     try:
-        fetch_result = fetch_url(site.url, timeout=25.0, stream_for_ttfb=True)
+        fetch_result = fetch_html_for_seo(site.url)
     except Exception as exc:  # noqa: BLE001
         result["error_message"] = str(exc)
         result["fetch_status"] = "error"
@@ -101,14 +103,40 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
         logger.exception("[SEO] site_id=%s fetch exception", site.id)
         return result
 
-    html_content = fetch_result.get("html_content") or fetch_result.get("content") or ""
-    page_size_kb = float(fetch_result.get("page_size_kb") or 0.0)
+    html_content = fetch_result.html or ""
+    page_size_kb = fetch_result.page_size_kb
+
+    # Store render mode in result for persistence
+    result["render_mode"]    = fetch_result.render_mode
+    result["used_fallback"]  = fetch_result.used_fallback
+    result["fallback_reason"] = fetch_result.fallback_reason
+
+    if fetch_result.render_mode == "BROWSER":
+        logger.info(
+            "[SEO] site_id=%s used browser rendering. Reason: %s",
+            site.id, fetch_result.fallback_reason,
+        )
+
+    # Build a fetch_result-compatible dict for downstream code
+    fetch_dict = {
+        "html_content":       html_content,
+        "content":            html_content,
+        "page_size_kb":       page_size_kb,
+        "status_code":        fetch_result.status_code,
+        "ttfb":               fetch_result.ttfb,
+        "total_response_time": fetch_result.response_time,
+        "response_time":      fetch_result.response_time,
+        "https_redirect":     fetch_result.https_redirect,
+        "headers":            fetch_result.headers,
+        "is_up":              fetch_result.is_up,
+        "error":              fetch_result.error,
+    }
 
     validation = validate_seo_fetch(
         html_content=html_content,
         page_size_kb=page_size_kb,
-        status_code=fetch_result.get("status_code"),
-        error=fetch_result.get("error"),
+        status_code=fetch_dict.get("status_code"),
+        error=fetch_dict.get("error"),
         site_url=site.url,
     )
     result["fetch_valid"] = validation.is_valid
@@ -138,10 +166,10 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
         signals["has_sitemap"] = _check_resource_exists(site.url, "/sitemap.xml", timeout=8.0)
         signals["has_robots_txt"] = signals["has_robots"]
         signals["has_sitemap_xml"] = signals["has_sitemap"]
-        signals["ttfb"] = fetch_result.get("ttfb")
-        signals["total_response_time"] = fetch_result.get("total_response_time") or fetch_result.get("response_time")
+        signals["ttfb"] = fetch_dict.get("ttfb")
+        signals["total_response_time"] = fetch_dict.get("total_response_time") or fetch_dict.get("response_time")
         signals["page_size_kb"] = page_size_kb
-        signals["https_redirect"] = fetch_result.get("https_redirect", False)
+        signals["https_redirect"] = fetch_dict.get("https_redirect", False)
     except Exception as exc:  # noqa: BLE001
         result["error_message"] = f"Parser error: {exc}"
         _save_seo_log(site, result, db_session, checked_at)
@@ -185,7 +213,7 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
 
     # ── Technology profiler ────────────────────────────────────────────────
     try:
-        response_headers = fetch_result.get("headers") or {}
+        response_headers = fetch_dict.get("headers") or {}
         tech = detect_technologies(html_content, response_headers)
         result["tech_stack"] = tech
 
@@ -230,6 +258,23 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
         result["broken_link_count"] = 0
         result["links_checked"] = 0
         logger.exception("[SEO] site_id=%s broken link checker failed", site.id)
+
+    # ── Security audit ─────────────────────────────────────────────────────
+    try:
+        response_headers_for_security = fetch_dict.get("headers") or {}
+        sec = run_security_audit(html_content, response_headers_for_security)
+        result["security_score"]   = sec["score"]
+        result["security_headers"] = sec["headers"]
+        result["security_issues"]  = sec["issues"]
+        result["malware_flags"]    = sec["malware"]
+        if sec["malware"]:
+            logger.warning("[SECURITY] site_id=%s malware flags: %s", site.id, sec["malware"])
+    except Exception:  # noqa: BLE001
+        result["security_score"]   = None
+        result["security_headers"] = {}
+        result["security_issues"]  = []
+        result["malware_flags"]    = []
+        logger.exception("[SEO] site_id=%s security audit failed", site.id)
 
     # Capture the old score BEFORE updating site.seo_score so the regression
     # comparison is always old-vs-new, never new-vs-new.
@@ -332,6 +377,15 @@ def _save_seo_log(site: Site, result: dict, db_session, checked_at=None) -> SEOL
         broken_links=result.get("broken_links") or {},
         broken_link_count=result.get("broken_link_count") or 0,
         links_checked=result.get("links_checked") or 0,
+        # Security
+        security_score=result.get("security_score"),
+        security_headers=result.get("security_headers") or {},
+        security_issues=result.get("security_issues") or [],
+        malware_flags=result.get("malware_flags") or [],
+        # Hybrid fetch
+        render_mode=result.get("render_mode", "HTTP"),
+        used_fallback=result.get("used_fallback", False),
+        fallback_reason=result.get("fallback_reason"),
     )
     db_session.add(log)
     db_session.flush()

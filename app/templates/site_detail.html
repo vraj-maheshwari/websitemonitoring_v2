@@ -134,14 +134,34 @@
       <div class="label">Audit Engine</div>
       <h2>Intelligence Breakdown</h2>
     </div>
-    {%- if report.fetch_valid and report.score is not none %}
-    <span class="pill {% if report.score >= 80 %}pill-green{% elif report.score >= 60 %}pill-yellow{% else %}pill-red{% endif %}">
-      Score: {{ report.score }}/100
-    </span>
-    {%- elif not report.fetch_valid %}
-    <span class="pill pill-yellow">Invalid fetch — no score</span>
-    {%- endif %}
+    <div style="display:flex;gap:8px;align-items:center;">
+      {%- if report.render_mode == 'BROWSER' %}
+      <span class="pill pill-blue" title="{{ report.fallback_reason or '' }}">🌐 Browser Render</span>
+      {%- elif report.render_mode == 'HTTP_BROWSER_FAILED' %}
+      <span class="pill pill-yellow" title="Browser fallback attempted but failed">⚠ Browser Failed</span>
+      {%- else %}
+      <span class="pill pill-gray">⚡ HTTP Fetch</span>
+      {%- endif %}
+      {%- if report.fetch_valid and report.score is not none %}
+      <span class="pill {% if report.score >= 80 %}pill-green{% elif report.score >= 60 %}pill-yellow{% else %}pill-red{% endif %}">
+        Score: {{ report.score }}/100
+      </span>
+      {%- elif not report.fetch_valid %}
+      <span class="pill pill-yellow">Invalid fetch — no score</span>
+      {%- endif %}
+    </div>
   </div>
+
+  {%- if report.used_fallback and report.render_mode == 'BROWSER' %}
+  <div style="padding:10px 14px;margin-bottom:14px;background:var(--blue-bg);border:1px solid rgba(59,130,246,.2);border-radius:var(--radius-sm);font-size:.82rem;color:var(--blue);">
+    🌐 This site uses bot protection or JavaScript rendering. Browser rendering was used to get accurate SEO data.
+    {% if report.fallback_reason %}<span style="opacity:.7;"> · {{ report.fallback_reason }}</span>{% endif %}
+  </div>
+  {%- elif report.used_fallback and report.render_mode == 'HTTP_BROWSER_FAILED' %}
+  <div style="padding:10px 14px;margin-bottom:14px;background:var(--yellow-bg);border:1px solid rgba(245,158,11,.2);border-radius:var(--radius-sm);font-size:.82rem;color:var(--yellow);">
+    ⚠ Bot protection detected but browser fallback failed. Results may be incomplete.
+  </div>
+  {%- endif %}
 
   {%- if report.fetch_valid and report.score is not none %}
   {%- set sc = report.score %}
@@ -401,8 +421,16 @@
     {%- set diff = report.tech_diff if (report and report.tech_diff) else {} %}
     {%- set added   = diff.added   if diff.added   else [] %}
     {%- set removed = diff.removed if diff.removed else [] %}
+    {%- set scan_ran = report and report.fetch_valid %}
     {% if not tech %}
     <div style="text-align:center;padding:24px 0;">
+      {% if scan_ran %}
+      <p class="muted small">No technologies detected in this scan.</p>
+      <p class="small" style="color:var(--text-3);margin-top:6px;">
+        The page may use inline styles/scripts with no identifiable framework signatures.
+        Server: <strong>{{ (report.signals or {}).get('server', '—') if report.signals else '—' }}</strong>
+      </p>
+      {% else %}
       <p class="muted small">No technology data in this scan.</p>
       <p class="small" style="color:var(--text-3);margin-top:6px;">
         Re-run a full audit to detect the tech stack — detection requires a fresh page fetch.
@@ -411,6 +439,7 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button type="submit" class="btn btn-secondary btn-sm">↻ Re-run SEO Audit</button>
       </form>
+      {% endif %}
     </div>
     {% else %}
     {% if added or removed %}
@@ -505,7 +534,7 @@
   </div>
   <div style="overflow-x:auto;">
     <table class="history-table">
-      <thead><tr><th>Date</th><th>Score</th><th>Status</th><th>Page Size</th><th>Fetch</th><th>Note</th></tr></thead>
+      <thead><tr><th>Date</th><th>Score</th><th>Status</th><th>Render</th><th>Page Size</th><th>Fetch</th><th>Note</th></tr></thead>
       <tbody>
         {% for log in seo_logs %}
         <tr class="{% if not log.fetch_valid %}warning{% endif %}">
@@ -516,6 +545,15 @@
             {% else %}<span class="pill pill-gray">Invalid</span>{% endif %}
           </td>
           <td><span class="pill pill-gray" style="font-size:.72rem;">{{ log.status }}</span></td>
+          <td>
+            {% if log.render_mode == 'BROWSER' %}
+              <span class="pill pill-blue" style="font-size:.72rem;">🌐 Browser</span>
+            {% elif log.render_mode == 'HTTP_BROWSER_FAILED' %}
+              <span class="pill pill-yellow" style="font-size:.72rem;">⚠ Fallback failed</span>
+            {% else %}
+              <span class="pill pill-gray" style="font-size:.72rem;">⚡ HTTP</span>
+            {% endif %}
+          </td>
           <td class="muted small">{% if log.fetch_page_size_kb is not none %}{{ '%.1f'|format(log.fetch_page_size_kb) }} KB{% else %}—{% endif %}</td>
           <td><span class="pill {% if log.fetch_valid %}pill-green{% else %}pill-yellow{% endif %}">{% if log.fetch_valid %}Valid{% else %}Invalid{% endif %}</span></td>
           <td class="muted small truncate" style="max-width:180px;">{{ log.invalidation_reason if not log.fetch_valid else '—' }}</td>
@@ -623,6 +661,224 @@
 
 </div>{# /detail-side #}
 </div>{# /detail-grid #}
+
+{# ══════════════════════════════════════════════════════
+   ANALYTICS — 30-day trends
+   ══════════════════════════════════════════════════════ #}
+{% if analytics %}
+{%- set ut = analytics.uptime_trend %}
+{%- set st = analytics.seo_trend %}
+{%- set ld = analytics.latency_distribution %}
+{%- set total_lat = ((ld.fast + ld.medium + ld.slow) if ld else 0) or 1 %}
+<div class="card" style="margin-top:20px;">
+  <div class="section-head">
+    <div>
+      <div class="label">Analytics</div>
+      <h2>{{ analytics.period_days }}-Day Performance Trends</h2>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <span class="pill pill-gray">{{ analytics.total_incidents }} incident(s)</span>
+      {% if analytics.avg_response_time_ms %}
+      <span class="pill pill-blue">Avg {{ analytics.avg_response_time_ms }}ms</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="analytics-grid">
+
+    <div class="chart-card">
+      <div class="chart-title">Uptime % — Daily</div>
+      {% if ut %}
+      <div class="sparkline" style="margin-bottom:8px;">
+        {% for row in ut[-30:] %}
+        {%- set h = ((row.uptime_pct / 100) * 48) | round(0) | int %}
+        <div class="sparkline-bar"
+             style="height:{{ [h,2]|max }}px;background:{% if row.uptime_pct >= 99 %}var(--green){% elif row.uptime_pct >= 90 %}var(--yellow){% else %}var(--red){% endif %};"
+             title="{{ row.date }}: {{ row.uptime_pct }}%"></div>
+        {% endfor %}
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--text-3);">
+        <span>{{ ut[0].date }}</span><span>{{ ut[-1].date }}</span>
+      </div>
+      {% else %}
+      <p class="muted small">No daily summary data yet. Summaries build overnight.</p>
+      {% endif %}
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-title">SEO Score — Daily Avg</div>
+      {% if st %}
+      <div class="sparkline" style="margin-bottom:8px;">
+        {% for row in st[-30:] %}
+        {%- set h = ((row.avg_score / 100) * 48) | round(0) | int %}
+        <div class="sparkline-bar"
+             style="height:{{ [h,2]|max }}px;background:{% if row.avg_score >= 80 %}var(--green){% elif row.avg_score >= 60 %}var(--yellow){% else %}var(--red){% endif %};"
+             title="{{ row.date }}: {{ row.avg_score }}"></div>
+        {% endfor %}
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--text-3);">
+        <span>{{ st[0].date }}</span><span>{{ st[-1].date }}</span>
+      </div>
+      {% else %}
+      <p class="muted small">No SEO summary data yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-title">Latency Distribution (last 30d)</div>
+      {% if ld %}
+      <div class="chart-bar-row">
+        <span class="bar-label val-green">Fast &lt;1s</span>
+        <div class="bar-track"><div class="bar-fill-inner" style="width:{{ ((ld.fast / total_lat) * 100) | round(0) }}%;background:var(--green);"></div></div>
+        <span class="bar-count">{{ ld.fast }}</span>
+      </div>
+      <div class="chart-bar-row">
+        <span class="bar-label val-yellow">Med &lt;3s</span>
+        <div class="bar-track"><div class="bar-fill-inner" style="width:{{ ((ld.medium / total_lat) * 100) | round(0) }}%;background:var(--yellow);"></div></div>
+        <span class="bar-count">{{ ld.medium }}</span>
+      </div>
+      <div class="chart-bar-row">
+        <span class="bar-label val-red">Slow ≥3s</span>
+        <div class="bar-track"><div class="bar-fill-inner" style="width:{{ ((ld.slow / total_lat) * 100) | round(0) }}%;background:var(--red);"></div></div>
+        <span class="bar-count">{{ ld.slow }}</span>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-title">Period Summary</div>
+      <div class="signal-list">
+        <div class="signal-row"><span>Avg Response</span>
+          <strong>{% if analytics.avg_response_time_ms %}{{ analytics.avg_response_time_ms }}ms{% else %}—{% endif %}</strong>
+        </div>
+        <div class="signal-row"><span>Incidents</span>
+          <strong class="{% if analytics.total_incidents == 0 %}val-green{% elif analytics.total_incidents <= 3 %}val-yellow{% else %}val-red{% endif %}">{{ analytics.total_incidents }}</strong>
+        </div>
+        <div class="signal-row"><span>Uptime data points</span><strong>{{ ut | length }}</strong></div>
+        <div class="signal-row"><span>SEO data points</span><strong>{{ st | length }}</strong></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endif %}
+
+{# ══════════════════════════════════════════════════════
+   INCIDENT TIMELINE + RCA
+   ══════════════════════════════════════════════════════ #}
+{% if recent_incidents %}
+<div class="card" style="margin-top:20px;">
+  <div class="section-head">
+    <div>
+      <div class="label">Incident History</div>
+      <h2>Recent Incidents</h2>
+    </div>
+    <span class="pill {% if site.incident_opened_at %}pill-red{% else %}pill-green{% endif %}">
+      {% if site.incident_opened_at %}Active incident{% else %}All clear{% endif %}
+    </span>
+  </div>
+
+  {% for incident in recent_incidents %}
+  <div style="margin-bottom:20px;padding-bottom:20px;{% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+      <span class="pill {% if incident.status == 'OPEN' %}pill-red{% else %}pill-green{% endif %}">
+        {{ incident.status }}
+      </span>
+      {% if incident.root_cause %}
+      <span class="rca-badge">{{ incident.root_cause }}</span>
+      {% endif %}
+      <span class="small muted">Opened {{ incident.opened_at.strftime('%b %d %H:%M') }}</span>
+      {% if incident.resolved_at %}
+      <span class="small muted">· Resolved {{ incident.resolved_at.strftime('%b %d %H:%M') }}</span>
+      {% endif %}
+    </div>
+
+    {% if incident.timeline %}
+    <div class="timeline">
+      {% for ev in incident.timeline %}
+      <div class="timeline-event ev-{{ ev.status | lower }}">
+        <div class="ev-header">
+          <span class="pill {% if ev.status == 'DOWN' %}pill-red{% elif ev.status == 'DEGRADED' %}pill-yellow{% else %}pill-green{% endif %}" style="font-size:.72rem;padding:2px 8px;">
+            {{ ev.status }}
+          </span>
+          {% if ev.status_code %}
+          <span class="pill pill-gray" style="font-size:.72rem;padding:2px 8px;">HTTP {{ ev.status_code }}</span>
+          {% endif %}
+          <span class="ev-time">{{ ev.time[:16] | replace('T',' ') }}</span>
+        </div>
+        <div class="ev-meta">
+          {% if ev.response_time %}{{ '%.0f'|format(ev.response_time * 1000) }}ms{% endif %}
+          {% if ev.error %} · {{ ev.error[:80] }}{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="muted small">No timeline data (incident predates this feature).</p>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{# ══════════════════════════════════════════════════════
+   SECURITY AUDIT
+   ══════════════════════════════════════════════════════ #}
+{% if report and report.security_score is not none %}
+<div class="card" style="margin-top:20px;">
+  <div class="section-head">
+    <div>
+      <div class="label">Security Audit</div>
+      <h2>HTTP Security Headers</h2>
+    </div>
+    <span class="pill {% if report.security_score >= 80 %}pill-green{% elif report.security_score >= 40 %}pill-yellow{% else %}pill-red{% endif %}">
+      Score: {{ report.security_score }}/100
+    </span>
+  </div>
+
+  <p class="small muted" style="margin-bottom:14px;">
+    Security headers are set by the web server or CDN. Most shared hosting and small sites score 0–40 here.
+    Each present header adds 20 points.
+  </p>
+
+  {%- set sec_headers = report.security_headers if report.security_headers else {} %}
+  {%- set header_labels = {
+    'strict-transport-security': 'Strict-Transport-Security (HSTS)',
+    'x-frame-options':           'X-Frame-Options',
+    'x-content-type-options':    'X-Content-Type-Options',
+    'x-xss-protection':          'X-XSS-Protection',
+    'content-security-policy':   'Content-Security-Policy'
+  } %}
+  <div style="margin-bottom:16px;">
+    {% for key, present in sec_headers.items() %}
+    <div class="security-header-row">
+      <span class="sh-name">{{ header_labels.get(key, key) }}</span>
+      <span class="pill {% if present %}pill-green{% else %}pill-red{% endif %}">
+        {% if present %}✓ Present{% else %}✗ Missing{% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+
+  {%- set malware = report.malware_flags if report.malware_flags else [] %}
+  {% if malware %}
+  <div>
+    <div class="label" style="color:var(--red);margin-bottom:8px;">⚠ Malware Signatures Detected</div>
+    {% for flag in malware %}
+    <div class="malware-flag">{{ flag }}</div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div style="font-size:.82rem;color:var(--green);">✓ No malware signatures detected in page source</div>
+  {% endif %}
+
+  {% if report.security_score == 0 %}
+  <div style="margin-top:14px;padding:10px 14px;background:var(--surface-2);border-radius:var(--radius-sm);font-size:.78rem;color:var(--text-3);">
+    💡 To improve: add these headers in your web server config (nginx/Apache) or via Cloudflare's security settings.
+    <a href="https://securityheaders.com/" target="_blank" rel="noopener" style="color:var(--blue);margin-left:4px;">Test on securityheaders.com →</a>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
 
 {% endblock %}
 

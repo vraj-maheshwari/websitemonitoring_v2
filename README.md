@@ -34,6 +34,9 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 | Core Web Vitals | Server-side proxy estimates for LCP, FID, and CLS derived from real fetch signals |
 | Technology profiler | Detects 40+ technologies (frameworks, CMS, CDN, analytics, servers) from HTML and headers |
 | Broken link checker | Concurrent HEAD/GET check of all unique links on the page, reports 4xx/5xx |
+| Incident timeline + RCA | Full lifecycle tracking with per-check timeline events and root cause classification |
+| Analytics | 30-day uptime/SEO trends, latency distribution, incident count |
+| Security audit | HTTP security header check + malware signature scan, 0–100 score |
 | Alerting | Email on DOWN, RECOVERY, SSL expiry, SEO regression |
 | Incident tracking | Opens/resolves incident records on status transitions |
 | Daily summaries | Aggregates raw logs into daily rollups before deletion |
@@ -95,6 +98,9 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 │   │   ├── ssl_service.py          # SSL certificate fetch and validation
 │   │   ├── seo_service.py          # SEO audit orchestration + cooldown logic
 │   │   ├── alert_service.py        # Alert dispatch, incident management, cooldowns
+│   │   ├── incident_service.py     # RCA detection, timeline building, incident lifecycle
+│   │   ├── analytics_service.py    # Trend queries: uptime/SEO/latency over time
+│   │   ├── security_service.py     # HTTP header checks + malware signature scan
 │   │   ├── email_service.py        # SMTP email sending
 │   │   ├── report_service.py       # JSON report generation
 │   │   ├── retention_service.py    # Log deletion with summary backfill
@@ -716,6 +722,12 @@ All JSON API routes are under `/api/`. CSRF is exempted for the API blueprint (u
 | GET | `/api/logs/<id>` | Last 10 uptime logs |
 | GET | `/api/seo-logs/<id>` | Last 10 SEO logs |
 | GET | `/api/site/<id>/status` | Current site status dict |
+| GET | `/api/sites/<id>/broken-links` | Broken link report from latest valid SEO scan |
+| GET | `/api/sites/<id>/tech-stack` | Technology stack from latest valid SEO scan |
+| GET | `/api/sites/<id>/analytics` | Trend analytics. Query: `?days=30` |
+| GET | `/api/sites/<id>/incidents` | List incidents. Query: `?status=OPEN&limit=20` |
+| GET | `/api/incidents/<id>` | Full incident detail with timeline and root cause |
+| GET | `/api/sites/<id>/security` | Security audit from latest valid SEO scan |
 
 ### Manual Check Triggers
 
@@ -925,3 +937,110 @@ Crawls all `<a href>` links found on the page and checks each one for HTTP error
 Each broken link includes: URL, status code, error message, link type, and anchor text.
 
 ---
+
+---
+
+## Incident Timeline & Root Cause Analysis
+
+Every downtime incident now tracks a full event timeline and a classified root cause.
+
+### Root Cause Categories
+
+| Code | Trigger |
+|---|---|
+| `TIMEOUT` | Error message contains "timeout" or "timed out" |
+| `DNS` | Error contains "dns", "name resolution", "getaddrinfo" |
+| `SERVER` | HTTP status code ≥ 500 |
+| `CLIENT` | HTTP status code 400–499 |
+| `CONNECTION` | "connection refused" or "connect error" |
+| `UNKNOWN` | None of the above |
+
+### Timeline Events
+
+Each uptime check during an open incident appends an event:
+
+```json
+{
+  "status": "DOWN",
+  "time": "2026-04-30T13:10:00+00:00",
+  "response_time": null,
+  "status_code": null,
+  "error": "Connection timed out"
+}
+```
+
+The timeline is seeded when the incident opens (DOWN event), updated on every subsequent check while the incident is OPEN, and closed with a final UP event on recovery.
+
+### API
+
+```
+GET /api/incidents/<id>
+→ { "status", "root_cause", "timeline": [...], "opened_at", "resolved_at", ... }
+
+GET /api/sites/<id>/incidents?status=OPEN&limit=20
+→ [ { incident }, ... ]
+```
+
+---
+
+## Analytics Dashboard
+
+`GET /api/sites/<id>/analytics?days=30` returns:
+
+```json
+{
+  "uptime_trend":          [{"date": "2026-04-01", "uptime_pct": 99.8}, ...],
+  "seo_trend":             [{"date": "2026-04-01", "avg_score": 82.0}, ...],
+  "latency_distribution":  {"fast": 1200, "medium": 340, "slow": 18},
+  "avg_response_time_ms":  412.5,
+  "total_incidents":       2,
+  "period_days":           30
+}
+```
+
+**Latency buckets:** fast < 1s · medium < 3s · slow ≥ 3s
+
+Data sources: `DailyUptimeSummary`, `DailySEOSummary`, `UptimeLog`, `Incident`. All queries are read-only and designed to complete in under 200ms.
+
+The site detail page renders sparkline charts for uptime and SEO trends, a bar chart for latency distribution, and a summary tile with avg response time and incident count.
+
+---
+
+## Security Monitoring
+
+Runs automatically during every SEO audit (no extra HTTP request — uses the main page fetch).
+
+### HTTP Security Headers (20 pts each = 100 max)
+
+| Header | Purpose |
+|---|---|
+| `Strict-Transport-Security` | Enforces HTTPS (HSTS) |
+| `X-Frame-Options` | Prevents clickjacking |
+| `X-Content-Type-Options` | Prevents MIME sniffing |
+| `X-XSS-Protection` | Legacy XSS filter |
+| `Content-Security-Policy` | Controls resource loading |
+
+### Malware Signatures
+
+Scans HTML source for patterns including:
+- `eval(base64_decode` — obfuscated PHP execution
+- `eval(unescape` / `document.write(unescape` — obfuscated JS injection
+- `crypto-miner`, `coinhive`, `cryptonight` — crypto-mining scripts
+- `String.fromCharCode` obfuscation sequences
+- External scripts from suspicious TLDs
+
+### Storage
+
+Results stored in `seo_logs`: `security_score`, `security_headers` (JSON), `security_issues` (list), `malware_flags` (list).
+
+### API
+
+```
+GET /api/sites/<id>/security
+→ {
+    "security_score": 60,
+    "security_headers": {"strict-transport-security": true, "x-frame-options": false, ...},
+    "security_issues": ["Missing X-Frame-Options", "Missing Content-Security-Policy"],
+    "malware_flags": []
+  }
+```

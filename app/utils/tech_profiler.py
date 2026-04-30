@@ -89,7 +89,8 @@ _SIGNATURES: list[tuple[str, str, Any]] = [
 
     # ── CDN / Hosting ──────────────────────────────────────────────────────
     ("cdn", "Cloudflare",
-     lambda h, hd: _h(hd, "cf-ray") != "" or _h(hd, "server").lower() == "cloudflare"),
+     lambda h, hd: _h(hd, "cf-ray") != "" or _h(hd, "server").lower() == "cloudflare"
+                   or "cdnjs.cloudflare.com" in h or "cdn.cloudflare.com" in h),
 
     ("cdn", "Fastly",
      lambda h, hd: _h(hd, "x-served-by").startswith("cache-") or _h(hd, "x-fastly-request-id") != ""),
@@ -109,6 +110,9 @@ _SIGNATURES: list[tuple[str, str, Any]] = [
     # ── Web Servers ────────────────────────────────────────────────────────
     ("server", "Nginx",
      lambda h, hd: _h(hd, "server").lower().startswith("nginx")),
+
+    ("server", "OpenResty",
+     lambda h, hd: _h(hd, "server").lower().startswith("openresty")),
 
     ("server", "Apache",
      lambda h, hd: _h(hd, "server").lower().startswith("apache")),

@@ -16,6 +16,11 @@ from app.models.alert_history import AlertHistory
 from app.models.incident import Incident
 from app.models.site_notification import SiteNotification
 from app.services.email_service import send_email
+from app.services.incident_service import (
+    open_incident_with_rca,
+    update_incident_timeline,
+    resolve_incident_with_timeline,
+)
 from app.utils.time import now_utc
 
 logger = logging.getLogger(__name__)
@@ -117,6 +122,18 @@ def handle_uptime_transition(site, previous_status: str | None, current_status: 
         _notify_site(site, incident, "DOWN", checked_at, status_code, response_time, error_message)
         return
 
+    # Mid-incident: site still DOWN or now DEGRADED — append timeline event
+    if previous_status == "DOWN" and current_status == "DOWN":
+        incident = (
+            Incident.query
+            .filter_by(site_id=site.id, status="OPEN")
+            .order_by(Incident.opened_at.desc())
+            .first()
+        )
+        if incident:
+            update_incident_timeline(incident, current_status, status_code, response_time, error_message, checked_at)
+        return
+
     if previous_status == "DOWN" and current_status != "DOWN":
         incident = _resolve_incident(site, status_code, response_time, error_message, checked_at)
         _notify_site(site, incident, "RECOVERY", checked_at, status_code, response_time, error_message)
@@ -163,6 +180,7 @@ def _open_incident(site, status_code, response_time, error_message, checked_at):
             opened_error_message=error_message,
         )
         db.session.add(incident)
+        open_incident_with_rca(incident, status_code, response_time, error_message, checked_at)
 
     site.incident_opened_at = checked_at
     return incident
@@ -176,11 +194,7 @@ def _resolve_incident(site, status_code, response_time, error_message, checked_a
         .first()
     )
     if incident:
-        incident.status = "RESOLVED"
-        incident.resolved_at = checked_at
-        incident.resolved_status_code = status_code
-        incident.resolved_response_time = response_time
-        incident.resolved_error_message = error_message
+        resolve_incident_with_timeline(incident, status_code, response_time, error_message, checked_at)
 
     site.incident_opened_at = None
     site.last_incident_resolved_at = checked_at

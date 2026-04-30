@@ -22,6 +22,10 @@ class Incident(db.Model):
     resolved_response_time = db.Column(db.Float, nullable=True)
     resolved_error_message = db.Column(db.Text, nullable=True)
 
+    # RCA + Timeline
+    root_cause = db.Column(db.String(32), nullable=True)   # TIMEOUT|DNS|SERVER|CLIENT|UNKNOWN
+    timeline   = db.Column(db.JSON, nullable=True)          # list of event dicts
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -35,4 +39,6 @@ class Incident(db.Model):
             "resolved_status_code": self.resolved_status_code,
             "resolved_response_time": self.resolved_response_time,
             "resolved_error_message": self.resolved_error_message,
+            "root_cause": self.root_cause,
+            "timeline": self.timeline or [],
         }

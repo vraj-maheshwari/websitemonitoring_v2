@@ -81,6 +81,11 @@ class SEOLog(db.Model):
     fetch_status = db.Column(db.String(20), default='ok')
     invalidation_reason = db.Column(db.Text, nullable=True)
 
+    # Hybrid fetch metadata
+    render_mode   = db.Column(db.String(32), nullable=True, default="HTTP")
+    used_fallback = db.Column(db.Boolean,    nullable=False, default=False)
+    fallback_reason = db.Column(db.Text,     nullable=True)
+
     # Core Web Vitals (server-side proxy estimates)
     cwv_lcp_estimate_s  = db.Column(db.Float,   nullable=True)
     cwv_lcp_rating      = db.Column(db.String(20), nullable=True)
@@ -99,6 +104,12 @@ class SEOLog(db.Model):
     broken_links        = db.Column(db.JSON,    nullable=True)  # broken_link_report_to_dict()
     broken_link_count   = db.Column(db.Integer, nullable=False, default=0)
     links_checked       = db.Column(db.Integer, nullable=False, default=0)
+
+    # Security audit
+    security_score   = db.Column(db.Integer, nullable=True)
+    security_headers = db.Column(db.JSON,    nullable=True)  # {header_name: bool}
+    security_issues  = db.Column(db.JSON,    nullable=True)  # list of issue strings
+    malware_flags    = db.Column(db.JSON,    nullable=True)  # list of matched signatures
 
     def to_dict(self) -> dict:
         return {
@@ -136,6 +147,9 @@ class SEOLog(db.Model):
             "fetch_status":      self.fetch_status,
             "invalidation_reason": self.invalidation_reason,
             "error_message":     self.error_message,
+            "render_mode":       self.render_mode or "HTTP",
+            "used_fallback":     self.used_fallback or False,
+            "fallback_reason":   self.fallback_reason,
             # Core Web Vitals estimates
             "cwv": self.cwv_data or {},
             # Technology stack
@@ -146,6 +160,11 @@ class SEOLog(db.Model):
             "broken_links":      self.broken_links or {},
             "broken_link_count": self.broken_link_count,
             "links_checked":     self.links_checked,
+            # Security
+            "security_score":   self.security_score,
+            "security_headers": self.security_headers or {},
+            "security_issues":  self.security_issues or [],
+            "malware_flags":    self.malware_flags or [],
         }
 
     def __repr__(self) -> str:

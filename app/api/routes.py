@@ -332,6 +332,62 @@ def get_tech_stack(site_id):
     })
 
 
+@api_bp.route("/sites/<int:site_id>/analytics", methods=["GET"])
+def get_analytics(site_id):
+    """Return trend analytics for a site. Query: ?days=30"""
+    from app.services.analytics_service import get_site_analytics
+    site = _get_owned_site_or_404(site_id)
+    days = request.args.get("days", 30, type=int)
+    return jsonify(get_site_analytics(site.id, days=days))
+
+
+@api_bp.route("/incidents/<int:incident_id>", methods=["GET"])
+def get_incident(incident_id):
+    """Return full incident detail including timeline and root cause."""
+    from app.models.incident import Incident
+    incident = db.session.get(Incident, incident_id)
+    if not incident:
+        return jsonify({"error": "Incident not found"}), 404
+    # Ownership check via site
+    _get_owned_site_or_404(incident.site_id)
+    return jsonify(incident.to_dict())
+
+
+@api_bp.route("/sites/<int:site_id>/incidents", methods=["GET"])
+def list_incidents(site_id):
+    """List incidents for a site. Query: ?status=OPEN|RESOLVED&limit=20"""
+    from app.models.incident import Incident
+    site = _get_owned_site_or_404(site_id)
+    status_filter = request.args.get("status")
+    limit = request.args.get("limit", 20, type=int)
+    q = Incident.query.filter_by(site_id=site.id)
+    if status_filter:
+        q = q.filter_by(status=status_filter.upper())
+    incidents = q.order_by(Incident.opened_at.desc()).limit(min(limit, 100)).all()
+    return jsonify([i.to_dict() for i in incidents])
+
+
+@api_bp.route("/sites/<int:site_id>/security", methods=["GET"])
+def get_security(site_id):
+    """Return security audit from the most recent valid SEO log."""
+    site = _get_owned_site_or_404(site_id)
+    log = (
+        SEOLog.query.filter_by(site_id=site.id)
+        .filter(SEOLog.fetch_valid.is_(True))
+        .order_by(SEOLog.checked_at.desc())
+        .first()
+    )
+    if not log:
+        return jsonify({"error": "No SEO audit data yet"}), 404
+    return jsonify({
+        "checked_at":      log.checked_at.isoformat(),
+        "security_score":  log.security_score,
+        "security_headers": log.security_headers or {},
+        "security_issues": log.security_issues or [],
+        "malware_flags":   log.malware_flags or [],
+    })
+
+
 @api_bp.route("/site/<int:site_id>/status", methods=["GET"])
 def get_site_status(site_id):
     site = _get_owned_site_or_404(site_id)
@@ -366,6 +422,8 @@ def dashboard():
 @web_bp.route("/site/<int:site_id>", methods=["GET"])
 def site_detail(site_id):
     site = _get_owned_site_or_404(site_id)
+    from app.models.incident import Incident
+    from app.services.analytics_service import get_site_analytics
 
     uptime_logs = (
         UptimeLog.query.filter_by(site_id=site_id)
@@ -385,6 +443,13 @@ def site_detail(site_id):
         .limit(10)
         .all()
     )
+    recent_incidents = (
+        Incident.query.filter_by(site_id=site_id)
+        .order_by(Incident.opened_at.desc())
+        .limit(10)
+        .all()
+    )
+    analytics = get_site_analytics(site_id, days=30)
 
     return render_template(
         "site_detail.html",
@@ -393,6 +458,8 @@ def site_detail(site_id):
         ssl_logs=ssl_logs,
         seo_logs=seo_logs,
         uptime_breakdown=Counter("Up" if log.is_up else "Down" for log in uptime_logs),
+        recent_incidents=recent_incidents,
+        analytics=analytics,
     )
 
 

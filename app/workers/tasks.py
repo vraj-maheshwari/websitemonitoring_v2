@@ -23,6 +23,11 @@ celery.conf.update(
     broker_connection_timeout=1,
     broker_transport_options={"max_retries": 0, "socket_connect_timeout": 1},
     task_publish_retry=False,
+    # Windows-safe pool — prefork (billiard) crashes on win32
+    worker_pool=Config.CELERY_WORKER_POOL,
+    worker_concurrency=Config.CELERY_WORKER_CONCURRENCY,
+    # Suppress Celery 6.0 deprecation warning
+    broker_connection_retry_on_startup=Config.BROKER_CONNECTION_RETRY_ON_STARTUP,
 )
 
 def acquire_check_lock(site_id: int, check_type: str) -> bool:

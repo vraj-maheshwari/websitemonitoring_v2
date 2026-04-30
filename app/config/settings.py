@@ -34,6 +34,15 @@ class Config:
     CELERY_ACCEPT_CONTENT = ["json"]
     CELERY_RESULT_SERIALIZER = "json"
     CELERY_TIMEZONE = "UTC"
+
+    # Windows: prefork pool (billiard) crashes — use solo instead.
+    # On Linux/Mac prefork is used for true parallelism.
+    CELERY_WORKER_POOL = "solo" if os.name == "nt" else "prefork"
+    CELERY_WORKER_CONCURRENCY = 1 if os.name == "nt" else None
+
+    # Suppress Celery 6.0 deprecation warning about broker retry on startup
+    BROKER_CONNECTION_RETRY_ON_STARTUP = True
+
     CELERY_BEAT_SCHEDULE = {
         "run-due-uptime-checks": {
             "task": "tasks.run_due_uptime_checks",

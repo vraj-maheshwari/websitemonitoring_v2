@@ -6,6 +6,15 @@ vs a host placeholder, error page, or empty response.
 
 If validation fails, the SEO check is marked fetch_valid=False
 and NO score is generated. This prevents false POOR reports.
+
+Design rules
+------------
+- Domain-name strings (great-site.net, 000webhost, etc.) are NOT checked
+  on large pages — they appear in real site content (links, canonical URLs).
+  They are only checked on small pages (< MIN_VALID_PAGE_SIZE_KB) where
+  the entire page IS the splash screen.
+- Phrase-based signatures (e.g. "Account suspended") are checked on all
+  pages because they are unambiguous error messages, not incidental text.
 """
 
 from dataclasses import dataclass
@@ -15,28 +24,35 @@ import logging
 logger = logging.getLogger("seo.validator")
 
 MIN_VALID_PAGE_SIZE_KB = 5.0
-MIN_VALID_WORD_COUNT = 30
-HOST_PLACEHOLDER_SIGNATURES = [
+
+# Checked on ALL page sizes — unambiguous error/placeholder phrases
+PHRASE_SIGNATURES = [
     "This site is temporarily unavailable",
     "Account suspended",
-    "under construction",
-    "Coming Soon",
     "Parked Domain",
     "This domain is for sale",
-    "Web Hosting",
-    "Free Website",
+    "Website is not configured",
+    "Welcome to nginx",
+    "Apache2 Default Page",
+    "403 Forbidden",
+    "503 Service Unavailable",
+]
+
+# Checked ONLY on small pages (< MIN_VALID_PAGE_SIZE_KB)
+# These are free-hosting domain strings that appear in real site HTML too
+SMALL_PAGE_ONLY_SIGNATURES = [
     "infinityfree",
     "great-site.net",
     "000webhost",
     "byethost",
-    "Website is not configured",
-    "Welcome to nginx",
-    "Apache2 Default Page",
+    "under construction",
+    "Coming Soon",
+    "Web Hosting",
+    "Free Website",
     "It works!",
     "Index of /",
-    "403 Forbidden",
-    "503 Service Unavailable",
 ]
+
 
 @dataclass
 class ValidationResult:
@@ -44,6 +60,7 @@ class ValidationResult:
     fetch_status: str
     reason: Optional[str]
     html_preview: str
+
 
 def validate_seo_fetch(
     html_content: str,
@@ -53,78 +70,91 @@ def validate_seo_fetch(
     site_url: str,
 ) -> ValidationResult:
     html_preview = html_content[:1000] if html_content else ""
+
     # Rule 1: Fetch completely failed
     if error and not html_content:
-        fetch_status = "timeout" if "timeout" in error.lower() or "timed out" in error.lower() else "error"
-        result = ValidationResult(
-            is_valid=False,
-            fetch_status=fetch_status,
-            reason=f"Fetch failed with error: {error}",
-            html_preview=html_preview
+        fetch_status = (
+            "timeout"
+            if error and ("timeout" in error.lower() or "timed out" in error.lower())
+            else "error"
         )
-        logger.warning("SEO fetch invalid", extra={"site_url": site_url, "fetch_status": result.fetch_status, "page_size_kb": page_size_kb, "status_code": status_code, "reason": result.reason, "html_preview_length": len(result.html_preview)})
-        return result
+        return _invalid(fetch_status, f"Fetch failed with error: {error}", html_preview, site_url, page_size_kb, status_code)
+
     # Rule 2: Empty response
-    if not html_content or len(html_content.strip()) == 0:
-        result = ValidationResult(
-            is_valid=False,
-            fetch_status="empty",
-            reason="Fetched HTML content is empty (0 bytes). Server may have returned no body.",
-            html_preview=""
-        )
-        logger.warning("SEO fetch invalid", extra={"site_url": site_url, "fetch_status": result.fetch_status, "page_size_kb": page_size_kb, "status_code": status_code, "reason": result.reason, "html_preview_length": len(result.html_preview)})
-        return result
-    # Rule 3: Page too small
+    if not html_content or not html_content.strip():
+        return _invalid("empty", "Fetched HTML content is empty. Server returned no body.", "", site_url, page_size_kb, status_code)
+
+    html_lower = html_content.lower()
+
+    # Rule 3: Page too small — check both signature lists
     if page_size_kb < MIN_VALID_PAGE_SIZE_KB:
-        html_lower = html_content.lower()
-        matched_signature = None
-        for sig in HOST_PLACEHOLDER_SIGNATURES:
-            if sig.lower() in html_lower:
-                matched_signature = sig
-                break
+        matched = _match_any(html_lower, PHRASE_SIGNATURES + SMALL_PAGE_ONLY_SIGNATURES)
         reason = (
             f"Page size is only {page_size_kb:.2f} KB (minimum: {MIN_VALID_PAGE_SIZE_KB} KB). "
-            f"Real multi-section pages are typically 10-200 KB. "
+            "Real pages are typically 10–200 KB."
         )
-        if matched_signature:
-            reason += f"Detected host placeholder signature: '{matched_signature}'. "
-        reason += "This is likely a host splash page, cold-start error, or server not ready."
-        result = ValidationResult(
-            is_valid=False,
-            fetch_status="invalid_content",
-            reason=reason,
-            html_preview=html_preview
-        )
-        logger.warning("SEO fetch invalid", extra={"site_url": site_url, "fetch_status": result.fetch_status, "page_size_kb": page_size_kb, "status_code": status_code, "reason": result.reason, "html_preview_length": len(result.html_preview)})
-        return result
+        if matched:
+            reason += f" Detected placeholder signature: '{matched}'."
+        reason += " Likely a host splash page, cold-start error, or server not ready."
+        return _invalid("invalid_content", reason, html_preview, site_url, page_size_kb, status_code)
+
     # Rule 4: HTTP error status
     if status_code and status_code >= 400:
-        result = ValidationResult(
-            is_valid=False,
-            fetch_status="error",
-            reason=f"Server returned HTTP {status_code}. Content is an error page, not the real site.",
-            html_preview=html_preview
+        return _invalid(
+            "error",
+            f"Server returned HTTP {status_code}. Content is an error page, not the real site.",
+            html_preview, site_url, page_size_kb, status_code,
         )
-        logger.warning("SEO fetch invalid", extra={"site_url": site_url, "fetch_status": result.fetch_status, "page_size_kb": page_size_kb, "status_code": status_code, "reason": result.reason, "html_preview_length": len(result.html_preview)})
-        return result
-    # Rule 5: Host placeholders in any size page
-    html_lower = html_content.lower()
-    for sig in HOST_PLACEHOLDER_SIGNATURES:
-        if sig.lower() in html_lower:
-            result = ValidationResult(
-                is_valid=False,
-                fetch_status="invalid_content",
-                reason=f"Detected known host placeholder signature: '{sig}'. This is not the real site content.",
-                html_preview=html_preview
-            )
-            logger.warning("SEO fetch invalid", extra={"site_url": site_url, "fetch_status": result.fetch_status, "page_size_kb": page_size_kb, "status_code": status_code, "reason": result.reason, "html_preview_length": len(result.html_preview)})
-            return result
+
+    # Rule 5: Unambiguous placeholder phrases on any size page
+    matched = _match_any(html_lower, PHRASE_SIGNATURES)
+    if matched:
+        return _invalid(
+            "invalid_content",
+            f"Detected placeholder signature: '{matched}'. This is not the real site content.",
+            html_preview, site_url, page_size_kb, status_code,
+        )
+
     # All checks passed
-    result = ValidationResult(
-        is_valid=True,
-        fetch_status="ok",
-        reason=None,
-        html_preview=html_preview
+    logger.info(
+        "SEO fetch valid",
+        extra={"site_url": site_url, "page_size_kb": page_size_kb, "status_code": status_code},
     )
-    logger.info("SEO fetch valid", extra={"site_url": site_url, "page_size_kb": page_size_kb, "status_code": status_code})
+    return ValidationResult(is_valid=True, fetch_status="ok", reason=None, html_preview=html_preview)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def _match_any(html_lower: str, signatures: list[str]) -> Optional[str]:
+    for sig in signatures:
+        if sig.lower() in html_lower:
+            return sig
+    return None
+
+
+def _invalid(
+    fetch_status: str,
+    reason: str,
+    html_preview: str,
+    site_url: str,
+    page_size_kb: float,
+    status_code: Optional[int],
+) -> ValidationResult:
+    result = ValidationResult(
+        is_valid=False,
+        fetch_status=fetch_status,
+        reason=reason,
+        html_preview=html_preview,
+    )
+    logger.warning(
+        "SEO fetch invalid",
+        extra={
+            "site_url": site_url,
+            "fetch_status": fetch_status,
+            "page_size_kb": page_size_kb,
+            "status_code": status_code,
+            "reason": reason,
+            "html_preview_length": len(html_preview),
+        },
+    )
     return result
