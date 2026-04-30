@@ -199,6 +199,14 @@
     <button class="tab-btn"         onclick="switchTab(event,'technical')">Technical</button>
     <button class="tab-btn"         onclick="switchTab(event,'content')">Content</button>
     <button class="tab-btn"         onclick="switchTab(event,'perf')">Perf &amp; Mobile</button>
+    <button class="tab-btn"         onclick="switchTab(event,'cwv')">Core Web Vitals</button>
+    <button class="tab-btn"         onclick="switchTab(event,'tech')">Tech Stack</button>
+    <button class="tab-btn"         onclick="switchTab(event,'links')">
+      Broken Links
+      {%- if report.broken_link_count and report.broken_link_count > 0 %}
+        <span class="pill pill-red" style="margin-left:4px;padding:1px 6px;font-size:.68rem;">{{ report.broken_link_count }}</span>
+      {%- endif %}
+    </button>
   </div>
 
   {# ── ON-PAGE ── #}
@@ -337,6 +345,152 @@
         </div>
       </div>
     </div>
+  </div>
+
+  {# ── CORE WEB VITALS ── #}
+  <div id="tab-cwv" class="tab-content">
+    {%- set cwv = report.cwv_data if (report and report.cwv_data) else {} %}
+    {% if cwv %}
+    <div class="cwv-grid">
+      <div class="cwv-card">
+        <div class="cwv-label">LCP — Largest Contentful Paint</div>
+        <div class="cwv-value cwv-{{ cwv.lcp_rating | replace('needs_improvement','needs') }}">
+          {{ '%.2f'|format(cwv.lcp_estimate_s) }}s
+        </div>
+        <span class="pill {% if cwv.lcp_rating == 'good' %}pill-green{% elif cwv.lcp_rating == 'needs_improvement' %}pill-yellow{% else %}pill-red{% endif %}" style="margin-bottom:8px;">
+          {% if cwv.lcp_rating == 'good' %}Good ≤2.5s{% elif cwv.lcp_rating == 'needs_improvement' %}Needs work ≤4s{% else %}Poor >4s{% endif %}
+        </span>
+        <div class="cwv-note">{{ cwv.lcp_note }}</div>
+      </div>
+      <div class="cwv-card">
+        <div class="cwv-label">FID — First Input Delay</div>
+        <div class="cwv-value cwv-{{ cwv.fid_rating | replace('needs_improvement','needs') }}">
+          {{ cwv.fid_estimate_ms | round(0) | int }}ms
+        </div>
+        <span class="pill {% if cwv.fid_rating == 'good' %}pill-green{% elif cwv.fid_rating == 'needs_improvement' %}pill-yellow{% else %}pill-red{% endif %}" style="margin-bottom:8px;">
+          {% if cwv.fid_rating == 'good' %}Good ≤100ms{% elif cwv.fid_rating == 'needs_improvement' %}Needs work ≤300ms{% else %}Poor >300ms{% endif %}
+        </span>
+        <div class="cwv-note">{{ cwv.fid_note }}</div>
+      </div>
+      <div class="cwv-card">
+        <div class="cwv-label">CLS — Cumulative Layout Shift</div>
+        <div class="cwv-value cwv-{{ cwv.cls_rating | replace('needs_improvement','needs') }}">
+          {{ '%.3f'|format(cwv.cls_estimate) }}
+        </div>
+        <span class="pill {% if cwv.cls_rating == 'good' %}pill-green{% elif cwv.cls_rating == 'needs_improvement' %}pill-yellow{% else %}pill-red{% endif %}" style="margin-bottom:8px;">
+          {% if cwv.cls_rating == 'good' %}Good ≤0.1{% elif cwv.cls_rating == 'needs_improvement' %}Needs work ≤0.25{% else %}Poor >0.25{% endif %}
+        </span>
+        <div class="cwv-note">{{ cwv.cls_note }}</div>
+      </div>
+    </div>
+    <div class="cwv-disclaimer">
+      ⚠ These are <strong>server-side proxy estimates</strong>, not real browser measurements.
+      Real Core Web Vitals require JavaScript execution in a browser.
+      For field data, use
+      <a href="https://pagespeed.web.dev/" target="_blank" rel="noopener" style="color:var(--blue);">Google PageSpeed Insights</a>
+      or the Chrome UX Report.
+    </div>
+    {% else %}
+    <p class="muted small" style="padding:16px 0;">CWV estimates not available. Run a full audit to generate them.</p>
+    {% endif %}
+  </div>
+
+  {# ── TECH STACK ── #}
+  <div id="tab-tech" class="tab-content">
+    {%- set tech = report.tech_stack if (report and report.tech_stack) else {} %}
+    {%- set diff = report.tech_diff if (report and report.tech_diff) else {} %}
+    {%- set added   = diff.added   if diff.added   else [] %}
+    {%- set removed = diff.removed if diff.removed else [] %}
+    {% if not tech %}
+    <div style="text-align:center;padding:24px 0;">
+      <p class="muted small">No technology data in this scan.</p>
+      <p class="small" style="color:var(--text-3);margin-top:6px;">
+        Re-run a full audit to detect the tech stack — detection requires a fresh page fetch.
+      </p>
+      <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='seo') }}" style="margin-top:12px;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-secondary btn-sm">↻ Re-run SEO Audit</button>
+      </form>
+    </div>
+    {% else %}
+    {% if added or removed %}
+    <div class="tech-diff-banner has-changes">
+      {% if added %}➕ New: {{ added | join(', ') }}{% endif %}
+      {% if added and removed %} &nbsp;·&nbsp; {% endif %}
+      {% if removed %}➖ Gone: {{ removed | join(', ') }}{% endif %}
+      &nbsp;— detected since last scan
+    </div>
+    {% else %}
+    <div class="tech-diff-banner no-changes">No technology changes detected since last scan.</div>
+    {% endif %}
+    {%- set category_labels = {
+      'js_framework': 'JavaScript Frameworks',
+      'cms':          'CMS / Site Builder',
+      'cdn':          'CDN / Hosting',
+      'server':       'Web Server',
+      'analytics':    'Analytics',
+      'css_framework':'CSS Framework',
+      'backend':      'Backend / Language'
+    } %}
+    {% for cat, names in tech.items() %}
+    {% if names %}
+    <div class="tech-category">
+      <div class="tech-category-label">{{ category_labels.get(cat, cat | upper) }}</div>
+      <div class="tech-tags">
+        {% for name in names %}
+        <span class="tech-tag {% if name in added %}added{% elif name in removed %}removed{% endif %}">
+          {{ name }}{% if name in added %} ✦{% endif %}
+        </span>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+    {% endfor %}
+    {% endif %}
+  </div>
+  <div id="tab-links" class="tab-content">
+    {%- set bl = report.broken_links if report.broken_links else {} %}
+    {%- set broken_list = bl.broken if bl.broken else [] %}
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <div>
+        <span class="label">Link Checker</span>
+        <div style="font-size:.85rem;color:var(--text-2);margin-top:2px;">
+          {{ report.links_checked or 0 }} links checked
+          {% if bl.skipped %} · {{ bl.skipped }} skipped (deduped){% endif %}
+        </div>
+      </div>
+      <span class="pill {% if report.broken_link_count == 0 %}pill-green{% else %}pill-red{% endif %}">
+        {% if report.broken_link_count == 0 %}No broken links{% else %}{{ report.broken_link_count }} broken{% endif %}
+      </span>
+    </div>
+
+    {% if broken_list %}
+    <div>
+      {% for link in broken_list %}
+      <div class="broken-link-row">
+        <div class="bl-status {% if link.status_code and link.status_code >= 500 %}bl-status-5xx{% elif link.status_code and link.status_code >= 400 %}bl-status-4xx{% else %}bl-status-err{% endif %}">
+          {{ link.status_code or 'ERR' }}
+        </div>
+        <div>
+          <div class="bl-url">{{ link.url }}</div>
+          {% if link.anchor_text %}<div class="bl-anchor">"{{ link.anchor_text }}"</div>{% endif %}
+        </div>
+        <div class="bl-type">
+          <span class="pill {% if link.link_type == 'internal' %}pill-blue{% else %}pill-gray{% endif %}">
+            {{ link.link_type }}
+          </span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% elif report.links_checked %}
+    <div style="text-align:center;padding:24px;color:var(--green);">
+      <div style="font-size:1.5rem;margin-bottom:8px;">✅</div>
+      All {{ report.links_checked }} links are working correctly.
+    </div>
+    {% else %}
+    <p class="muted small" style="padding:16px 0;">No link data yet. Run a full audit to check links.</p>
+    {% endif %}
   </div>
 
 </div>{# /card #}

@@ -31,6 +31,9 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 | Uptime monitoring | HTTP GET every 30–60 seconds, tracks status code, response time, TTFB |
 | SSL monitoring | Checks certificate validity and days-to-expiry via raw socket/TLS |
 | SEO auditing | Deep HTML scan with 30+ signals, 0–100 weighted score |
+| Core Web Vitals | Server-side proxy estimates for LCP, FID, and CLS derived from real fetch signals |
+| Technology profiler | Detects 40+ technologies (frameworks, CMS, CDN, analytics, servers) from HTML and headers |
+| Broken link checker | Concurrent HEAD/GET check of all unique links on the page, reports 4xx/5xx |
 | Alerting | Email on DOWN, RECOVERY, SSL expiry, SEO regression |
 | Incident tracking | Opens/resolves incident records on status transitions |
 | Daily summaries | Aggregates raw logs into daily rollups before deletion |
@@ -102,6 +105,9 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 │   │   ├── parser.py               # HTML → 50+ SEO signals (BeautifulSoup)
 │   │   ├── seo_engine.py           # Weighted scoring algorithm (0–100)
 │   │   ├── seo_validator.py        # Detects placeholder/empty pages
+│   │   ├── tech_profiler.py        # Detects 40+ technologies from HTML + headers
+│   │   ├── cwv_estimator.py        # Server-side LCP/FID/CLS proxy estimates
+│   │   ├── broken_link_checker.py  # Concurrent link checker (HEAD → GET fallback)
 │   │   ├── time.py                 # now_utc(), normalize() UTC helpers
 │   │   └── urls.py                 # URL canonicalization and normalization
 │   │
@@ -342,8 +348,24 @@ seo_logs
 ├── Intelligence: score_breakdown (JSON), signals (JSON)
 │                 issues (JSON list), recommendations (JSON list)
 │
-└── Fetch Validation: fetch_valid, fetch_status, fetch_html_preview
-                      fetch_page_size_kb, invalidation_reason, error_message
+├── Fetch Validation: fetch_valid, fetch_status, fetch_html_preview
+│                     fetch_page_size_kb, invalidation_reason, error_message
+│
+├── Core Web Vitals (proxy estimates):
+│   cwv_lcp_estimate_s, cwv_lcp_rating       — Largest Contentful Paint
+│   cwv_fid_estimate_ms, cwv_fid_rating      — First Input Delay
+│   cwv_cls_estimate, cwv_cls_rating         — Cumulative Layout Shift
+│   cwv_data (JSON)                          — full estimates dict
+│
+├── Technology Profiler:
+│   tech_stack (JSON)   — detected technologies grouped by category
+│   tech_flat  (JSON)   — flat list of technology names
+│   tech_diff  (JSON)   — {added, removed, unchanged} vs previous scan
+│
+└── Broken Links:
+    broken_links (JSON)  — full report with each broken URL, status, type
+    broken_link_count    — count of broken links found
+    links_checked        — count of unique URLs checked
 ```
 
 ### Incident
@@ -846,3 +868,60 @@ The daily summary task also runs independently at 00:05 UTC to build summaries f
 - `.spinner` (CSS animation)
 - `.score-tile`, `.bar-fill`, `.signal-row`, `.audit-item`, `.rec-item`
 - `.tabs-nav`, `.tab-btn`, `.tab-content`
+
+
+---
+
+## Advanced SEO Features
+
+### Core Web Vitals (Proxy Estimates)
+
+Real Core Web Vitals require JavaScript execution in a browser. We provide **server-side proxy estimates** derived from measurable signals:
+
+| Metric | Proxy Formula | Thresholds |
+|---|---|---|
+| **LCP** (Largest Contentful Paint) | TTFB + render_delay<br>render_delay = (page_size_kb / 1000 × 0.5) + (js_blocking × 0.08) + (css_blocking × 0.05) | Good: ≤2.5s<br>Needs work: ≤4.0s<br>Poor: >4.0s |
+| **FID** (First Input Delay) | js_blocking_count × 80ms | Good: ≤100ms<br>Needs work: ≤300ms<br>Poor: >300ms |
+| **CLS** (Cumulative Layout Shift) | missing_alt_count × 0.05<br>(images without alt often lack dimensions) | Good: ≤0.1<br>Needs work: ≤0.25<br>Poor: >0.25 |
+
+Each estimate includes a plain-English note explaining what it's based on. The UI displays a clear disclaimer that these are not real browser measurements. For field data, use [Google PageSpeed Insights](https://pagespeed.web.dev/) or Chrome UX Report.
+
+### Technology Profiler
+
+Detects 40+ technologies from HTML source and HTTP response headers:
+
+**Categories:**
+- **JS Frameworks** — React, Next.js, Vue, Nuxt, Angular, Svelte, Ember, Alpine, jQuery, HTMX
+- **CMS / Site Builders** — WordPress, Shopify, Wix, Squarespace, Webflow, Ghost, Drupal, Joomla, HubSpot
+- **CDN / Hosting** — Cloudflare, Fastly, AWS CloudFront, Vercel, Netlify, GitHub Pages
+- **Web Servers** — Nginx, Apache, Caddy, LiteSpeed, IIS
+- **Analytics** — Google Analytics, Google Tag Manager, Plausible, Fathom, Hotjar, Mixpanel
+- **CSS Frameworks** — Tailwind CSS, Bootstrap, Bulma, Foundation
+- **Backend / Language** — PHP, Python/Django, Python/Flask, Ruby on Rails, Node.js/Express, ASP.NET
+
+**Detection is passive** — no extra requests beyond the main page fetch. Each scan compares the current tech stack against the previous scan and reports:
+- `added` — new technologies detected (e.g., "This site just started using React")
+- `removed` — technologies no longer detected (e.g., "They switched from jQuery to React")
+- `unchanged` — technologies present in both scans
+
+### Broken Link Checker
+
+Crawls all `<a href>` links found on the page and checks each one for HTTP errors:
+
+**Features:**
+- Concurrent checking via `ThreadPoolExecutor` (12 workers)
+- Deduplicates URLs — 266 anchor tags → 184 unique URLs checked
+- Uses HEAD first, falls back to GET if HEAD returns 405
+- 8-second timeout per link
+- Max 3 redirects per link
+- Skips `mailto:`, `tel:`, `javascript:`, `data:`, `ftp:`, and fragment-only `#` links
+- Checks up to 500 unique links per audit (configurable)
+
+**Results grouped by:**
+- Broken (4xx/5xx or connection error)
+- OK (2xx/3xx)
+- Internal vs external classification
+
+Each broken link includes: URL, status code, error message, link type, and anchor text.
+
+---

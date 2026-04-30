@@ -20,6 +20,9 @@ from app.utils.parser import parse_seo_intelligence
 from app.utils.seo_engine import analyze_seo
 from app.utils.seo_validator import validate_seo_fetch
 from app.utils.time import now_utc
+from app.utils.tech_profiler import detect_technologies, diff_tech_stacks
+from app.utils.cwv_estimator import estimate_cwv, cwv_to_dict
+from app.utils.broken_link_checker import extract_all_links, check_broken_links, broken_link_report_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +175,62 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
         logger.exception("[SEO] site_id=%s scorer exception", site.id)
         return result
 
+    # ── Core Web Vitals estimates ──────────────────────────────────────────
+    try:
+        cwv = estimate_cwv(signals, ttfb=signals.get("ttfb"))
+        result["cwv"] = cwv_to_dict(cwv)
+    except Exception:  # noqa: BLE001
+        result["cwv"] = {}
+        logger.exception("[SEO] site_id=%s CWV estimation failed", site.id)
+
+    # ── Technology profiler ────────────────────────────────────────────────
+    try:
+        response_headers = fetch_result.get("headers") or {}
+        tech = detect_technologies(html_content, response_headers)
+        result["tech_stack"] = tech
+
+        # Diff against previous scan's tech stack
+        previous_seo = (
+            db_session.query(SEOLog)
+            .filter(SEOLog.site_id == site.id, SEOLog.fetch_valid.is_(True))
+            .order_by(SEOLog.checked_at.desc())
+            .first()
+        )
+        prev_flat = (previous_seo.tech_flat or []) if previous_seo else []
+        result["tech_diff"] = diff_tech_stacks(prev_flat, tech["flat"])
+        if result["tech_diff"]["added"]:
+            logger.info(
+                "[TECH] site_id=%s new technologies detected: %s",
+                site.id, result["tech_diff"]["added"],
+            )
+        if result["tech_diff"]["removed"]:
+            logger.info(
+                "[TECH] site_id=%s technologies no longer detected: %s",
+                site.id, result["tech_diff"]["removed"],
+            )
+    except Exception:  # noqa: BLE001
+        result["tech_stack"] = {}
+        result["tech_diff"] = {}
+        logger.exception("[SEO] site_id=%s tech profiler failed", site.id)
+
+    # ── Broken link checker ────────────────────────────────────────────────
+    try:
+        all_links = extract_all_links(html_content, site.url)
+        link_report = check_broken_links(all_links, site.url)
+        result["broken_links"] = broken_link_report_to_dict(link_report)
+        result["broken_link_count"] = link_report.broken_count
+        result["links_checked"] = link_report.total_checked
+        if link_report.broken_count > 0:
+            logger.warning(
+                "[LINKS] site_id=%s found %d broken link(s) out of %d checked",
+                site.id, link_report.broken_count, link_report.total_checked,
+            )
+    except Exception:  # noqa: BLE001
+        result["broken_links"] = {}
+        result["broken_link_count"] = 0
+        result["links_checked"] = 0
+        logger.exception("[SEO] site_id=%s broken link checker failed", site.id)
+
     # Capture the old score BEFORE updating site.seo_score so the regression
     # comparison is always old-vs-new, never new-vs-new.
     old_score = site.seo_score if site.seo_score else None
@@ -257,6 +316,22 @@ def _save_seo_log(site: Site, result: dict, db_session, checked_at=None) -> SEOL
         recommendations=result.get("recommendations", []),
         error_message=result.get("error_message"),
         checked_at=checked_at,
+        # Core Web Vitals
+        cwv_data=result.get("cwv") or {},
+        cwv_lcp_estimate_s=(result.get("cwv") or {}).get("lcp_estimate_s"),
+        cwv_lcp_rating=(result.get("cwv") or {}).get("lcp_rating"),
+        cwv_fid_estimate_ms=(result.get("cwv") or {}).get("fid_estimate_ms"),
+        cwv_fid_rating=(result.get("cwv") or {}).get("fid_rating"),
+        cwv_cls_estimate=(result.get("cwv") or {}).get("cls_estimate"),
+        cwv_cls_rating=(result.get("cwv") or {}).get("cls_rating"),
+        # Technology profiler
+        tech_stack=(result.get("tech_stack") or {}).get("detected") or {},
+        tech_flat=(result.get("tech_stack") or {}).get("flat") or [],
+        tech_diff=result.get("tech_diff") or {},
+        # Broken links
+        broken_links=result.get("broken_links") or {},
+        broken_link_count=result.get("broken_link_count") or 0,
+        links_checked=result.get("links_checked") or 0,
     )
     db_session.add(log)
     db_session.flush()

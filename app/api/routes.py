@@ -291,6 +291,47 @@ def get_seo_logs(site_id):
     return jsonify([log.to_dict() for log in logs])
 
 
+@api_bp.route("/sites/<int:site_id>/broken-links", methods=["GET"])
+def get_broken_links(site_id):
+    """Return broken link data from the most recent valid SEO log."""
+    site = _get_owned_site_or_404(site_id)
+    log = (
+        SEOLog.query.filter_by(site_id=site.id)
+        .filter(SEOLog.fetch_valid.is_(True))
+        .order_by(SEOLog.checked_at.desc())
+        .first()
+    )
+    if not log:
+        return jsonify({"error": "No SEO audit data yet"}), 404
+    return jsonify({
+        "checked_at":      log.checked_at.isoformat(),
+        "links_checked":   log.links_checked,
+        "broken_link_count": log.broken_link_count,
+        "broken_links":    log.broken_links or {},
+    })
+
+
+@api_bp.route("/sites/<int:site_id>/tech-stack", methods=["GET"])
+def get_tech_stack(site_id):
+    """Return technology stack from the most recent valid SEO log."""
+    site = _get_owned_site_or_404(site_id)
+    log = (
+        SEOLog.query.filter_by(site_id=site.id)
+        .filter(SEOLog.fetch_valid.is_(True))
+        .order_by(SEOLog.checked_at.desc())
+        .first()
+    )
+    if not log:
+        return jsonify({"error": "No SEO audit data yet"}), 404
+    return jsonify({
+        "checked_at": log.checked_at.isoformat(),
+        "tech_stack": log.tech_stack or {},
+        "tech_flat":  log.tech_flat or [],
+        "tech_diff":  log.tech_diff or {},
+        "server":     (log.signals or {}).get("server", "") if log.signals else "",
+    })
+
+
 @api_bp.route("/site/<int:site_id>/status", methods=["GET"])
 def get_site_status(site_id):
     site = _get_owned_site_or_404(site_id)
@@ -550,6 +591,9 @@ _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 def _is_valid_email(email: str) -> bool:
     return bool(_EMAIL_RE.fullmatch(email.strip()))
+
+
+def _parse_interval(value, default: int, minimum: int) -> int:
     if value in (None, ""):
         value = default
     try:
