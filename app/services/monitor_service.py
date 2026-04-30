@@ -16,6 +16,7 @@ from app.utils.http        import fetch_url
 from app.utils.time        import now_utc
 
 logger = logging.getLogger(__name__)
+SEO_COOLDOWN_AFTER_RECOVERY_SECONDS = 120
 
 def run_uptime_check(site_id: int) -> UptimeLog | None:
     """
@@ -65,6 +66,14 @@ def run_uptime_check(site_id: int) -> UptimeLog | None:
         
         schedule_next_run(site, CHECK_UPTIME, checked_at)
         db.session.add(log)
+
+        if previous_status == STATUS_DOWN and current_status in (STATUS_UP, STATUS_DEGRADED):
+            site.last_downtime_ended_at = checked_at
+            logger.info(
+                "[UPTIME] site_id=%s recovered from DOWN. SEO cooldown activated for %ss.",
+                site.id,
+                SEO_COOLDOWN_AFTER_RECOVERY_SECONDS,
+            )
 
         # Trigger alerts
         alert_service.handle_uptime_transition(

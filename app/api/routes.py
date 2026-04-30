@@ -21,7 +21,7 @@ from app.models.user import User
 from app.services.monitor_service import run_uptime_check
 from app.services.monitoring_service import prepare_site
 from app.services.report_service import generate_site_report
-from app.services.seo_service import run_seo_check
+from app.services.seo_service import should_skip_seo_for_cooldown, run_seo_check
 from app.services.ssl_service import run_ssl_check
 from app.utils.time import normalize, now_utc
 from app.utils.urls import normalize_url
@@ -153,6 +153,7 @@ def get_site(site_id):
         "latest_uptime": latest_uptime.to_dict() if latest_uptime else None,
         "latest_ssl": latest_ssl.to_dict() if latest_ssl else None,
         "latest_seo": latest_seo.to_dict() if latest_seo else None,
+        "seo": _serialize_site_seo(site, latest_seo),
     })
     return jsonify(payload)
 
@@ -169,11 +170,24 @@ def delete_site(site_id):
 def run_all_checks(site_id):
     site = _get_owned_site_or_404(site_id)
     statuses = {}
-    for check_type, task in (("uptime", run_uptime_check_task), ("ssl", run_ssl_check_task), ("seo", run_seo_check_task)):
+    should_skip, skip_reason = should_skip_seo_for_cooldown(site)
+    for check_type, task in (("uptime", run_uptime_check_task), ("ssl", run_ssl_check_task)):
         if getattr(site, f"{check_type}_status") == "running":
             statuses[check_type] = "skipped (already running)"
         else:
             statuses[check_type] = _safe_delay(task, site.id)
+    if site.seo_status == "running":
+        seo_dispatch_status = "skipped (already running)"
+    elif should_skip:
+        seo_dispatch_status = f"skipped (cooldown active)"
+    else:
+        seo_dispatch_status = _safe_delay(run_seo_check_task, site.id)
+    statuses.update({
+        "message": "Check triggered",
+        "seo": seo_dispatch_status,
+        "cooldown_active": should_skip,
+        "cooldown_reason": skip_reason if should_skip else None,
+    })
     return jsonify(statuses)
 
 
@@ -222,8 +236,21 @@ def check_site(site_id):
 @api_bp.route("/check-seo/<int:site_id>", methods=["GET"])
 def check_site_seo(site_id):
     site = _get_owned_site_or_404(site_id)
+    should_skip, skip_reason = should_skip_seo_for_cooldown(site)
+    if should_skip:
+        return jsonify({
+            "message": "SEO check skipped",
+            "dispatch": "skipped (cooldown active)",
+            "cooldown_active": True,
+            "cooldown_reason": skip_reason,
+        }), 202
     result = _safe_delay(run_seo_check_task, site.id)
-    return jsonify({"message": "SEO check requested", "dispatch": result}), 202 if result["status"] == "queued" else 503
+    return jsonify({
+        "message": "SEO check requested",
+        "dispatch": result,
+        "cooldown_active": False,
+        "cooldown_reason": None,
+    }), 202 if result["status"] == "queued" else 503
 
 
 @api_bp.route("/check-ssl/<int:site_id>", methods=["GET"])
@@ -450,6 +477,24 @@ def _parse_notification_emails(raw_value: str) -> list[str]:
         if email:
             emails.append(email)
     return emails
+
+
+def _serialize_site_seo(site: Site, latest_log: SEOLog | None) -> dict:
+    last_fetch_valid = site.last_seo_fetch_valid
+    warning = None
+    if last_fetch_valid is False:
+        warning = (
+            "Last SEO check fetched an invalid/placeholder page. Score may be inaccurate. "
+            "Trigger a manual re-check when the site is fully online."
+        )
+    return {
+        "score": site.seo_score,
+        "state": site.seo_state,
+        "last_fetch_valid": last_fetch_valid,
+        "last_check_at": site.last_seo_check_at.isoformat() if site.last_seo_check_at else None,
+        "warning": warning,
+        "latest_log": latest_log.to_dict() if latest_log else None,
+    }
 
 
 def _owned_sites_query():

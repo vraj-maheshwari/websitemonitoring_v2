@@ -53,7 +53,7 @@
     <article class="metric-card panel">
         <span class="metric-label">SEO Performance</span>
         <strong class="tone-{{ 'up' if site.seo_score >= 80 else ('warn' if site.seo_score >= 50 else 'down') }}">
-            {{ site.seo_score }}/100
+            {% if site.last_seo_fetch_valid is sameas false %}Invalid{% else %}{{ site.seo_score }}/100{% endif %}
         </strong>
         <p class="small m-0">Dynamic weighted intelligence score.</p>
     </article>
@@ -61,6 +61,22 @@
 
 {% if seo_logs and seo_logs[0] %}
 {% set report = seo_logs[0] %}
+{% if site.last_seo_fetch_valid is sameas false or report.fetch_valid is sameas false %}
+<section class="alert-warning panel" id="seo-invalid-warning">
+    <div>
+        <strong>SEO score may be inaccurate.</strong>
+        <p class="small m-0">
+            The last SEO scan fetched a placeholder or empty page, possibly due to server cold-start or recent downtime.
+        </p>
+        <small class="muted" id="seo-invalid-reason">
+            {{ report.invalidation_reason or 'Trigger a manual re-check when the site is fully online.' }}
+        </small>
+    </div>
+    <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='seo') }}">
+        <button type="submit" class="button button-secondary">Re-run SEO Check</button>
+    </form>
+</section>
+{% endif %}
 <section class="dashboard-grid">
     <div class="panel">
         <div class="section-heading">
@@ -160,6 +176,47 @@
 </div>
 {% endif %}
 
+{% if seo_logs %}
+<section class="panel seo-history-panel">
+    <div class="section-heading">
+        <span>SEO History</span>
+        <h2>Fetch Quality</h2>
+    </div>
+    <div class="table-shell">
+        <table>
+            <thead>
+                <tr>
+                    <th>Checked At</th>
+                    <th>Score</th>
+                    <th>Status</th>
+                    <th>Page Size</th>
+                    <th>Fetch Valid</th>
+                    <th>Note</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in seo_logs %}
+                <tr class="{% if log.fetch_valid is sameas false %}table-warning{% endif %}">
+                    <td>{{ log.checked_at.strftime('%b %d %H:%M') }}</td>
+                    <td>
+                        {% if log.fetch_valid and log.score is not none %}
+                            <span class="status-badge tone-{{ 'up' if log.score >= 80 else ('warn' if log.score >= 60 else 'down') }}">{{ log.score }}</span>
+                        {% else %}
+                            <span class="status-badge tone-warn">Invalid</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ log.status }}</td>
+                    <td>{% if log.fetch_page_size_kb is not none %}{{ '%.1f'|format(log.fetch_page_size_kb) }} KB{% else %}--{% endif %}</td>
+                    <td>{{ 'Yes' if log.fetch_valid else 'No' }}</td>
+                    <td class="small">{{ log.invalidation_reason if not log.fetch_valid else '--' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+
 <style>
     .audit-categories { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
     .audit-cat { padding: 15px; background: rgba(255,255,255,0.03); border-radius: 8px; cursor: pointer; transition: 0.2s; border: 1px solid transparent; }
@@ -175,6 +232,9 @@
     
     .signal { display: flex; justify-content: space-between; margin-bottom: 8px; }
     .m-0 { margin: 0; }
+    .alert-warning { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin-bottom: 24px; border-color: rgba(255, 180, 77, 0.45); background: rgba(255, 180, 77, 0.10); }
+    .seo-history-panel { margin-top: 24px; }
+    .table-warning { background: rgba(255, 180, 77, 0.08); }
 </style>
 {% endblock %}
 

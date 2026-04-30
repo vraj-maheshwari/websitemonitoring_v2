@@ -1,6 +1,12 @@
 def analyze_seo(signals: dict, ttfb: float | None = None, https_redirect: bool = False) -> dict:
     ttfb = ttfb if ttfb is not None else signals.get("ttfb")
     page_size_kb = float(signals.get("page_size_kb") or 0.0)
+    if page_size_kb < 5.0:
+        raise ValueError(
+            f"analyze_seo() called with page_size_kb={page_size_kb:.2f} KB. "
+            "Content too small to be a real page. "
+            "Call validate_seo_fetch() first and only score valid content."
+        )
     https_redirect = bool(https_redirect or signals.get("https_redirect"))
 
     on_page = 0
@@ -22,14 +28,7 @@ def analyze_seo(signals: dict, ttfb: float | None = None, https_redirect: bool =
     content += 30 if signals.get("has_logical_hierarchy") else 0
     content += round(30 * float(signals.get("alt_text_coverage", 1.0)))
 
-    performance = 0
-    if ttfb is not None:
-        performance += 50 if ttfb < 0.8 else 30 if ttfb < 1.5 else 0
-    if page_size_kb < 500:
-        performance += 50
-    elif page_size_kb < 1000:
-        performance += 35
-    performance = min(performance, 100)
+    performance = _score_performance(signals)
 
     security_mobile = 0
     security_mobile += 40 if https_redirect else 0
@@ -62,6 +61,31 @@ def analyze_seo(signals: dict, ttfb: float | None = None, https_redirect: bool =
         "issues": issues,
         "recommendations": recommendations,
     }
+
+
+def _score_performance(signals: dict) -> int:
+    ttfb = signals.get("ttfb") or signals.get("total_response_time", 99)
+    page_size_kb = signals.get("page_size_kb", 9999)
+
+    score = 0
+    if ttfb < 0.8:
+        score += 50
+    elif ttfb < 1.5:
+        score += 30
+
+    if page_size_kb < 500:
+        score += 30
+    elif page_size_kb < 1000:
+        score += 15
+
+    js_blocking = signals.get("js_blocking_count", 0)
+    css_blocking = signals.get("css_blocking_count", 0)
+    if js_blocking == 0 and css_blocking == 0:
+        score += 20
+    elif js_blocking + css_blocking <= 2:
+        score += 10
+
+    return min(score, 100)
 
 
 def _issue(check: str, category: str, message: str, impact: str) -> dict:

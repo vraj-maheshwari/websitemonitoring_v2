@@ -6,6 +6,7 @@ All services import from here — never hardcode credentials.
 """
 import os
 from dotenv import load_dotenv
+from celery.schedules import crontab
 
 load_dotenv()
 
@@ -34,21 +35,29 @@ class Config:
     CELERY_RESULT_SERIALIZER = "json"
     CELERY_TIMEZONE = "UTC"
     CELERY_BEAT_SCHEDULE = {
-        "run-due-checks-every-30-seconds": {
-            "task": "tasks.dispatch_due_checks",
+        "run-due-uptime-checks": {
+            "task": "tasks.run_due_uptime_checks",
             "schedule": 30.0,
         },
-        "run-zombie-rescue-every-5-minutes": {
+        "run-due-ssl-checks": {
+            "task": "tasks.run_due_ssl_checks",
+            "schedule": crontab(minute=0),
+        },
+        "run-due-seo-checks": {
+            "task": "tasks.run_due_seo_checks",
+            "schedule": crontab(minute=5),
+        },
+        "run-zombie-rescue": {
             "task": "tasks.run_zombie_rescue",
             "schedule": 300.0,
         },
-        "run-daily-uptime-summary": {
+        "run-daily-summary": {
             "task": "tasks.run_daily_summary",
-            "schedule": 86400.0,
+            "schedule": crontab(hour=0, minute=5),
         },
-        "run-log-retention-nightly": {
+        "run-data-retention": {
             "task": "tasks.run_retention_cycle",
-            "schedule": 86400.0,
+            "schedule": crontab(hour=3, minute=0),
         },
     }
 

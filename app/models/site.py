@@ -72,6 +72,8 @@ class Site(db.Model):
     seo_state = db.Column(db.String(32), nullable=False, default="UNKNOWN")
     seo_score = db.Column(db.Integer, nullable=False, default=0)
     seo_last_error = db.Column(db.Text, nullable=True)
+    last_seo_fetch_valid = db.Column(db.Boolean, default=True)
+    last_downtime_ended_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
     # Relationships
     uptime_logs = db.relationship("UptimeLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
@@ -103,6 +105,7 @@ class Site(db.Model):
             "ssl_expiry_date": self.ssl_expiry_date.isoformat() if self.ssl_expiry_date else None,
             "seo_state": self.seo_state,
             "seo_score": self.seo_score,
+            "last_seo_fetch_valid": self.last_seo_fetch_valid,
             "last_uptime_check_at": self.last_uptime_check_at.isoformat() if self.last_uptime_check_at else None,
             "last_ssl_check_at": self.last_ssl_check_at.isoformat() if self.last_ssl_check_at else None,
             "last_seo_check_at": self.last_seo_check_at.isoformat() if self.last_seo_check_at else None,

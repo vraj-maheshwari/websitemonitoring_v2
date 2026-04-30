@@ -21,8 +21,8 @@ class SEOLog(db.Model):
                                  nullable=False, index=True)
 
     # Core Metrics
-    score            = db.Column(db.Integer, nullable=False, default=0)
-    status           = db.Column(db.String(32), nullable=False, default="CRITICAL")
+    score            = db.Column(db.Integer, nullable=True)
+    status           = db.Column(db.String(32), nullable=False, default="UNKNOWN")
 
     # 1. On-Page Signals
     title            = db.Column(db.String(512), nullable=False, default="")
@@ -75,6 +75,12 @@ class SEOLog(db.Model):
     checked_at       = db.Column(db.DateTime(timezone=True), default=now_utc, nullable=False,
                                  index=True)
 
+    fetch_valid = db.Column(db.Boolean, default=True)
+    fetch_html_preview = db.Column(db.Text, nullable=True)
+    fetch_page_size_kb = db.Column(db.Float, nullable=True)
+    fetch_status = db.Column(db.String(20), default='ok')
+    invalidation_reason = db.Column(db.Text, nullable=True)
+
     def to_dict(self) -> dict:
         return {
             "id":                self.id,
@@ -100,11 +106,17 @@ class SEOLog(db.Model):
             "mobile_friendly":   self.mobile_friendly,
             "https_redirect":    self.https_redirect,
             "mixed_content_count": self.mixed_content_count,
-            "score_breakdown":   self.score_breakdown or {},
-            "issues":            self.issues or [],
-            "recommendations":   self.recommendations or [],
-            "signals":           self.signals or {},
+            "score_breakdown":   (self.score_breakdown or {}) if self.fetch_valid else None,
+            "issues":            (self.issues or []) if self.fetch_valid else [],
+            "recommendations":   (self.recommendations or []) if self.fetch_valid else [],
+            "signals":           (self.signals or {}) if self.fetch_valid else {},
             "checked_at":        self.checked_at.isoformat(),
+            "fetch_valid":       self.fetch_valid,
+            "fetch_html_preview": self.fetch_html_preview,
+            "fetch_page_size_kb": self.fetch_page_size_kb,
+            "fetch_status":      self.fetch_status,
+            "invalidation_reason": self.invalidation_reason,
+            "error_message":     self.error_message,
         }
 
     def __repr__(self) -> str:

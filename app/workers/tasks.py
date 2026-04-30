@@ -1,4 +1,6 @@
 from celery import Celery
+from datetime import timedelta
+import logging
 from app import create_app
 from app.config.settings import Config
 from app.extensions import db
@@ -6,10 +8,12 @@ from app.models.site import Site
 from app.services.monitor_service import run_uptime_check as run_uptime_service
 from app.services.monitoring_service import CHECK_SEO, CHECK_SSL, CHECK_UPTIME, get_due_site_ids
 from app.services.retention_service import run_retention_cycle as run_retention_service
-from app.services.seo_service import run_seo_check as run_seo_service
+from app.services.seo_service import should_skip_seo_for_cooldown, run_seo_check as run_seo_service
 from app.services.summary_service import run_daily_summary as run_daily_summary_service
 from app.services.ssl_service import run_ssl_check as run_ssl_service
 from app.utils.time import now_utc
+
+logger = logging.getLogger(__name__)
 
 # Initialize Celery
 celery = Celery("tasks", broker=Config.CELERY_BROKER_URL, backend=Config.CELERY_RESULT_BACKEND)
@@ -96,8 +100,8 @@ def run_ssl_check_task(site_id: int):
             release_check_lock(site, "ssl")
     return "OK"
 
-@celery.task(name="tasks.run_seo_check", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
-def run_seo_check_task(site_id: int):
+@celery.task(name="tasks.run_seo_check", bind=True, max_retries=1, default_retry_delay=60)
+def run_seo_check_task(self, site_id: int):
     app = create_app()
     with app.app_context():
         site = db.session.get(Site, site_id)
@@ -107,14 +111,32 @@ def run_seo_check_task(site_id: int):
             return "Already running"
 
         try:
-            run_seo_service(site_id)
+            should_skip, reason = should_skip_seo_for_cooldown(site)
+            if should_skip:
+                logger.info("[SEO TASK] site_id=%s cooldown active, rescheduling. Reason: %s", site_id, reason)
+                run_seo_check_task.apply_async(args=[site_id], countdown=120)
+                site.seo_status = "pending"
+                db.session.commit()
+                return "Cooldown active"
+
+            site.seo_status = "running"
+            site.last_seo_check_at = now_utc()
+            db.session.commit()
+
+            result = run_seo_service(site, db.session)
+            site.seo_status = "done" if result and not result.get("error_message") else "failed"
+            if result and result.get("fetch_valid") is False:
+                site.seo_status = "done"
+                logger.warning("[SEO TASK] site_id=%s fetch invalid: %s", site_id, result.get("invalidation_reason"))
+            site.refresh_app_status()
+            db.session.commit()
         except Exception:
+            logger.exception("[SEO TASK] site_id=%s exception", site_id)
             db.session.rollback()
             site = db.session.get(Site, site_id)
             site.seo_status = "failed"
             site.refresh_app_status()
             db.session.commit()
-            raise
         finally:
             db.session.refresh(site)
             if site.seo_status == "running":
@@ -132,12 +154,52 @@ def dispatch_due_checks():
         }
 
 
+@celery.task(name="tasks.run_due_uptime_checks")
+def run_due_uptime_checks():
+    with create_app().app_context():
+        return _dispatch_for_type(CHECK_UPTIME, run_uptime_check_task)
+
+
+@celery.task(name="tasks.run_due_ssl_checks")
+def run_due_ssl_checks():
+    with create_app().app_context():
+        return _dispatch_for_type(CHECK_SSL, run_ssl_check_task)
+
+
+@celery.task(name="tasks.run_due_seo_checks")
+def run_due_seo_checks():
+    with create_app().app_context():
+        return _dispatch_for_type(CHECK_SEO, run_seo_check_task)
+
+
 @celery.task(name="tasks.run_zombie_rescue")
 def run_zombie_rescue_task():
     with create_app().app_context():
-        rescued = Site.rescue_stuck_tasks()
+        rescued = {"uptime": 0, "ssl": 0, "seo": 0}
+        thresholds = {
+            "uptime": timedelta(minutes=10),
+            "ssl": timedelta(minutes=30),
+            "seo": timedelta(minutes=90),
+        }
+        now = now_utc()
+        for check_type, threshold in thresholds.items():
+            cutoff = now - threshold
+            status_field = getattr(Site, f"{check_type}_status")
+            started_field = getattr(Site, f"{check_type}_started_at")
+            stuck_sites = Site.query.filter(status_field == "running", started_field < cutoff).all()
+            for site in stuck_sites:
+                logger.warning(
+                    "[ZOMBIE] Rescuing site_id=%s %s stuck since %s",
+                    site.id,
+                    check_type,
+                    getattr(site, f"{check_type}_started_at"),
+                )
+                setattr(site, f"{check_type}_status", "failed")
+                setattr(site, f"{check_type}_started_at", None)
+                site.refresh_app_status()
+                rescued[check_type] += 1
         db.session.commit()
-        return {"rescued": rescued}
+        return rescued
 
 @celery.task(name="tasks.run_retention_cycle", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
 def run_retention_cycle_task():
