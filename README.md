@@ -47,7 +47,7 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 | **Security audit** | HTTP security header check + malware signature scan, 0–100 score |
 | **Incident timeline + RCA** | Full lifecycle tracking with per-check timeline events and root cause classification |
 | **Analytics** | 30-day uptime/SEO trends, latency distribution, incident count |
-| **Alerting** | Email on DOWN, RECOVERY, SSL expiry, SEO regression |
+| **Alerting** | Microsoft Teams alerts on DOWN, RECOVERY, SSL expiry, SEO regression |
 | **Incident tracking** | Opens/resolves incident records on status transitions |
 | **Daily summaries** | Aggregates raw logs into daily rollups before deletion |
 | **JSON export** | Download full site report as structured JSON |
@@ -96,8 +96,7 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 │   │   ├── ssl_log.py              # One row per SSL check
 │   │   ├── seo_log.py              # One row per SEO audit (50+ columns)
 │   │   ├── incident.py             # Downtime incident open/resolve records
-│   │   ├── alert_history.py        # Every alert email sent, with delivery status
-│   │   ├── site_notification.py    # Email recipients per site
+│   │   ├── alert_history.py        # Every Teams alert sent, with delivery status
 │   │   ├── daily_uptime_summary.py # Daily rollup of uptime logs
 │   │   ├── daily_ssl_summary.py    # Daily rollup of SSL logs
 │   │   └── daily_seo_summary.py    # Daily rollup of SEO logs
@@ -111,7 +110,7 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 │   │   ├── incident_service.py     # RCA detection, timeline building, incident lifecycle
 │   │   ├── analytics_service.py    # Trend queries: uptime/SEO/latency over time
 │   │   ├── security_service.py     # HTTP header checks + malware signature scan
-│   │   ├── email_service.py        # SMTP email sending
+│   │   ├── teams_service.py        # Microsoft Teams webhook sending
 │   │   ├── report_service.py       # JSON report generation
 │   │   ├── retention_service.py    # Log deletion with summary backfill
 │   │   └── summary_service.py      # Daily aggregation for all three check types
@@ -218,13 +217,7 @@ All config lives in `app/config/settings.py` and is loaded from `.env` via `pyth
 | `ALERT_COOLDOWN_MINUTES` | `15` | Minimum gap between repeat alerts |
 | `LOG_RETENTION_DAYS` | `30` | Days to keep raw logs before deletion |
 | `HTTP_VERIFY_SSL` | `true` | Whether to verify SSL on outbound requests |
-| `SMTP_HOST` | `` | SMTP server for email alerts |
-| `SMTP_PORT` | `587` | SMTP port |
-| `SMTP_USERNAME` | `` | SMTP auth username |
-| `SMTP_PASSWORD` | `` | SMTP auth password |
-| `SMTP_USE_TLS` | `true` | Enable STARTTLS |
-| `SMTP_FROM_EMAIL` | `ALERT_EMAIL` | From address for alert emails |
-| `ALERT_EMAIL` | `admin@example.com` | Fallback alert recipient |
+| `TEAMS_WEBHOOK_URL` | Power Automate webhook | Microsoft Teams alert webhook |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 
 ---
@@ -261,7 +254,7 @@ Browser / API Client
   SQLAlchemy ORM → SQLite / PostgreSQL
         │
         ▼
-  alert_service.py → email_service.py → SMTP
+  alert_service.py → teams_service.py → Microsoft Teams webhook
 ```
 
 **Celery Beat** runs on a separate process and dispatches tasks on schedule:
@@ -585,7 +578,7 @@ incidents
 
 ### AlertHistory
 
-Every alert email attempted, with delivery outcome.
+Every Teams alert attempted, with delivery outcome.
 
 ```
 alert_history
@@ -1296,10 +1289,9 @@ alert_service.check_ssl_alerts() / handle_uptime_transition() / check_seo_alerts
   ├─ _send_alert()          ← logs to stdout (swap for SendGrid/Slack/PagerDuty)
   │
   └─ _notify_site()
-       ├─ Query SiteNotification for active recipients
        ├─ Check _cooldown_active() — skip if alert sent recently
        ├─ Create AlertHistory row (PENDING)
-       ├─ send_email(recipient, subject, body)
+       ├─ send_teams_alert(subject, body)
        └─ Update AlertHistory → SENT or FAILED
 ```
 
@@ -1321,7 +1313,7 @@ All JSON API routes are under `/api/`. CSRF is exempted for the API blueprint (u
 
 | Method | Route | Description |
 |---|---|---|
-| POST | `/api/sites` | Add a site. Body: `{url, name?, check_interval?, uptime_check_interval?, ssl_check_interval?, seo_check_interval?, notification_emails?}` |
+| POST | `/api/sites` | Add a site. Body: `{url, name?, check_interval?, uptime_check_interval?, ssl_check_interval?, seo_check_interval?}` |
 | GET | `/api/sites` | List all sites for current user. Query: `?since=<ISO8601>` for delta polling |
 | GET | `/api/sites/<id>` | Get site with latest logs |
 | DELETE | `/api/sites/<id>` | Delete site and all associated data |

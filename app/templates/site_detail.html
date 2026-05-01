@@ -163,6 +163,12 @@
   </div>
   {%- endif %}
 
+  {%- set op = report.score_breakdown.on_page        or 0 %}
+  {%- set tc = report.score_breakdown.technical       or 0 %}
+  {%- set ct = report.score_breakdown.content         or 0 %}
+  {%- set pf = report.score_breakdown.performance     or 0 %}
+  {%- set sm = report.score_breakdown.security_mobile or 0 %}
+
   {%- if report.fetch_valid and report.score is not none %}
   {%- set sc = report.score %}
   <div style="margin-bottom:20px;">
@@ -173,11 +179,6 @@
     <div style="height:8px;background:var(--surface-3);border-radius:4px;overflow:hidden;">
       <div class="bar-fill {{ score_bar_cls(sc) }}" style="width:{{ sc }}%;"></div>
     </div>
-    {%- set op = report.score_breakdown.on_page        or 0 %}
-    {%- set tc = report.score_breakdown.technical       or 0 %}
-    {%- set ct = report.score_breakdown.content         or 0 %}
-    {%- set pf = report.score_breakdown.performance     or 0 %}
-    {%- set sm = report.score_breakdown.security_mobile or 0 %}
     <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-top:12px;">
       <div class="score-tile">
         <div class="tile-val {{ tile_cls(op / 100) }}">{{ op }}<span class="tile-denom">/100</span></div>
@@ -214,29 +215,26 @@
   {%- endif %}
 
   {# Tab nav #}
-  <div class="tabs-nav">
-    <button class="tab-btn active"  onclick="switchTab(event,'on-page')">On-Page</button>
-    <button class="tab-btn"         onclick="switchTab(event,'technical')">Technical</button>
-    <button class="tab-btn"         onclick="switchTab(event,'content')">Content</button>
-    <button class="tab-btn"         onclick="switchTab(event,'perf')">Perf &amp; Mobile</button>
-    <button class="tab-btn"         onclick="switchTab(event,'cwv')">Core Web Vitals</button>
-    <button class="tab-btn"         onclick="switchTab(event,'tech')">Tech Stack</button>
-    <button class="tab-btn"         onclick="switchTab(event,'links')">
-      Broken Links
-      {%- if report.broken_link_count and report.broken_link_count > 0 %}
-        <span class="pill pill-red" style="margin-left:4px;padding:1px 6px;font-size:.68rem;">{{ report.broken_link_count }}</span>
-      {%- endif %}
-    </button>
-    <button class="tab-btn"         onclick="switchTab(event,'security')">
-      Security
-      {%- if report.security_grade %}
-        <span class="pill {% if report.security_grade == 'A' %}pill-green{% elif report.security_grade == 'B' %}pill-blue{% elif report.security_grade == 'C' %}pill-yellow{% else %}pill-red{% endif %}" style="margin-left:4px;padding:1px 6px;font-size:.68rem;">{{ report.security_grade }}</span>
-      {%- endif %}
-    </button>
+  <div class="audit-section-index">
+    <span>On-Page</span>
+    <span>Technical</span>
+    <span>Content</span>
+    <span>Performance</span>
+    <span>Core Web Vitals</span>
+    <span>Tech Stack</span>
+    <span>Broken Links</span>
+    <span>Security{% if report.security_grade %} {{ report.security_grade }}{% endif %}</span>
   </div>
 
   {# ── ON-PAGE ── #}
   <div id="tab-on-page" class="tab-content active">
+    <div class="audit-section-head">
+      <div>
+        <div class="label">On-Page</div>
+        <h3>Search Snippets &amp; Heading Structure</h3>
+      </div>
+      <span class="pill {% if op >= 80 %}pill-green{% elif op >= 60 %}pill-yellow{% else %}pill-red{% endif %}">{{ op }}/100</span>
+    </div>
     <div class="audit-grid">
       <div class="audit-item">
         <div class="label">Page Title</div>
@@ -281,6 +279,13 @@
 
   {# ── TECHNICAL ── #}
   <div id="tab-technical" class="tab-content">
+    <div class="audit-section-head">
+      <div>
+        <div class="label">Technical</div>
+        <h3>Indexing, Canonicals &amp; Crawl Signals</h3>
+      </div>
+      <span class="pill {% if tc >= 80 %}pill-green{% elif tc >= 60 %}pill-yellow{% else %}pill-red{% endif %}">{{ tc }}/100</span>
+    </div>
     <div class="audit-grid">
       <div class="audit-item">
         <div class="label">Canonical URL</div>
@@ -316,6 +321,13 @@
 
   {# ── CONTENT ── #}
   <div id="tab-content" class="tab-content">
+    <div class="audit-section-head">
+      <div>
+        <div class="label">Content</div>
+        <h3>Copy Depth, Images &amp; Link Coverage</h3>
+      </div>
+      <span class="pill {% if ct >= 80 %}pill-green{% elif ct >= 60 %}pill-yellow{% else %}pill-red{% endif %}">{{ ct }}/100</span>
+    </div>
     <div class="audit-grid">
       <div class="audit-item">
         <div class="label">Word Count</div>
@@ -341,6 +353,13 @@
   {# ── PERF & MOBILE ── #}
   <div id="tab-perf" class="tab-content">
     {% set ttfb_ms = (report.ttfb * 1000) | round(0) | int if report.ttfb else none %}
+    <div class="audit-section-head">
+      <div>
+        <div class="label">Perf &amp; Mobile</div>
+        <h3>Page Weight, Blocking Assets &amp; Mobile Readiness</h3>
+      </div>
+      <span class="pill {% if pf >= 80 %}pill-green{% elif pf >= 60 %}pill-yellow{% else %}pill-red{% endif %}">{{ pf }}/100</span>
+    </div>
     <div class="audit-grid">
       <div class="audit-item">
         <div class="label">TTFB</div>
@@ -375,6 +394,15 @@
 
   {# ── CORE WEB VITALS ── #}
   <div id="tab-cwv" class="tab-content">
+    <div class="audit-section-head">
+      <div>
+        <div class="label">Core Web Vitals</div>
+        <h3>Browser Performance Measurements</h3>
+      </div>
+      <span class="pill {% if report.lh_performance_score is not none and report.lh_performance_score >= 90 %}pill-green{% elif report.lh_performance_score is not none and report.lh_performance_score >= 50 %}pill-yellow{% elif report.lh_performance_score is not none %}pill-red{% else %}pill-gray{% endif %}">
+        {% if report.lh_performance_score is not none %}{{ report.lh_performance_score }}/100{% else %}Pending{% endif %}
+      </span>
+    </div>
     {%- set has_lighthouse = report and report.lh_audited_at %}
     {%- set cwv = report.cwv_data if (report and report.cwv_data) else {} %}
     {% if has_lighthouse %}
@@ -518,6 +546,13 @@
 
   {# ── TECH STACK ── #}
   <div id="tab-tech" class="tab-content">
+    <div class="audit-section-head">
+      <div>
+        <div class="label">Tech Stack</div>
+        <h3>Detected Platform &amp; Frameworks</h3>
+      </div>
+      <span class="pill {% if report.tech_flat %}pill-blue{% else %}pill-gray{% endif %}">{{ report.tech_flat|length if report.tech_flat else 0 }} detected</span>
+    </div>
     {%- set tech = report.tech_stack if (report and report.tech_stack) else {} %}
     {%- set diff = report.tech_diff if (report and report.tech_diff) else {} %}
     {%- set added   = diff.added   if diff.added   else [] %}
@@ -579,6 +614,15 @@
     {% endif %}
   </div>
   <div id="tab-links" class="tab-content">
+    <div class="audit-section-head">
+      <div>
+        <div class="label">Broken Links</div>
+        <h3>Internal &amp; External Link Health</h3>
+      </div>
+      <span class="pill {% if report.broken_link_count == 0 %}pill-green{% else %}pill-red{% endif %}">
+        {% if report.broken_link_count == 0 %}Clean{% else %}{{ report.broken_link_count }} broken{% endif %}
+      </span>
+    </div>
     {%- set bl = report.broken_links if report.broken_links else {} %}
     {%- set broken_list = bl.broken if bl.broken else [] %}
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
@@ -628,6 +672,13 @@
     {%- set sec = report.security_categories if report.security_categories else {} %}
     {%- set grade = report.security_grade or 'F' %}
     {%- set sec_score = report.security_score if report.security_score is not none else 0 %}
+    <div class="audit-section-head">
+      <div>
+        <div class="label">Security</div>
+        <h3>Headers, CSP, CORS &amp; Malware Signals</h3>
+      </div>
+      <span class="pill {% if grade == 'A' %}pill-green{% elif grade == 'B' %}pill-blue{% elif grade == 'C' %}pill-yellow{% else %}pill-red{% endif %}">Grade {{ grade }}</span>
+    </div>
 
     {# Grade + score header #}
     <div style="display:flex;align-items:center;gap:20px;margin-bottom:20px;">
@@ -744,7 +795,7 @@
     <div class="label">SEO History</div>
     <h2>Scan Log</h2>
   </div>
-  <div style="overflow-x:auto;">
+  <div class="history-scroll">
     <table class="history-table">
       <thead><tr><th>Date</th><th>Score</th><th>Status</th><th>Render</th><th>Page Size</th><th>Fetch</th><th>Note</th></tr></thead>
       <tbody>

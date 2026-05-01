@@ -85,13 +85,10 @@ class Config:
     HTTP_VERIFY_SSL = os.getenv("HTTP_VERIFY_SSL", "true").lower() == "true"
 
     # Alerts
-    ALERT_EMAIL = os.getenv("ALERT_EMAIL", "admin@example.com")
-    SMTP_HOST = os.getenv("SMTP_HOST", "")
-    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-    SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
-    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-    SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
-    SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL", ALERT_EMAIL)
+    TEAMS_WEBHOOK_URL = os.getenv(
+        "TEAMS_WEBHOOK_URL",
+        "https://default7fb910a1b6dd4dfcb4b7f2f8393b00.24.environment.api.powerplatform.com:443/powerautomate/automations/direct/workflows/f84a9e052f3344329e1b85f94fd30958/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=i7KVeG5N23_dKBTtNdB4RBmIqxMZ75apanok5PvSjTg",
+    )
 
     # Retry logic
     MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))

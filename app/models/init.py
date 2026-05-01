@@ -5,7 +5,6 @@ from .ssl_log    import SSLLog
 from .seo_log    import SEOLog
 from .incident import Incident
 from .alert_history import AlertHistory
-from .site_notification import SiteNotification
 from .daily_uptime_summary import DailyUptimeSummary
 from .daily_ssl_summary import DailySSLSummary
 from .daily_seo_summary import DailySEOSummary
@@ -18,7 +17,6 @@ __all__ = [
     "SEOLog",
     "Incident",
     "AlertHistory",
-    "SiteNotification",
     "DailyUptimeSummary",
     "DailySSLSummary",
     "DailySEOSummary",

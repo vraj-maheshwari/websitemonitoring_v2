@@ -30,7 +30,6 @@ def create_app():
         import app.models.seo_log
         import app.models.incident
         import app.models.alert_history
-        import app.models.site_notification
         import app.models.daily_uptime_summary
         import app.models.daily_ssl_summary
         import app.models.daily_seo_summary

@@ -7,7 +7,6 @@ from .daily_uptime_summary import DailyUptimeSummary
 from .incident import Incident
 from .seo_log import SEOLog
 from .site import Site
-from .site_notification import SiteNotification
 from .ssl_log import SSLLog
 from .uptime_log import UptimeLog
 from .user import User
@@ -21,7 +20,6 @@ __all__ = [
     "Incident",
     "SEOLog",
     "Site",
-    "SiteNotification",
     "SSLLog",
     "UptimeLog",
     "User",

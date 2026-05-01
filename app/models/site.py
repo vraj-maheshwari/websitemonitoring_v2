@@ -85,7 +85,6 @@ class Site(db.Model):
     ssl_logs = db.relationship("SSLLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     seo_logs = db.relationship("SEOLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     incidents = db.relationship("Incident", backref="site", lazy="dynamic", cascade="all, delete-orphan")
-    notifications = db.relationship("SiteNotification", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     alert_history = db.relationship("AlertHistory", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     daily_summaries = db.relationship("DailyUptimeSummary", backref="site", lazy="dynamic", cascade="all, delete-orphan")
 

@@ -1,4 +1,3 @@
-import re
 from collections import Counter
 from statistics import mean
 
@@ -15,7 +14,6 @@ from app.extensions import db
 from app.models.daily_uptime_summary import DailyUptimeSummary
 from app.models.seo_log import SEOLog
 from app.models.site import Site
-from app.models.site_notification import SiteNotification
 from app.models.ssl_log import SSLLog
 from app.models.uptime_log import UptimeLog
 from app.models.user import User
@@ -85,8 +83,6 @@ def add_site():
         seo_interval = _parse_interval(data.get("seo_check_interval", 604800), default=604800, minimum=3600)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    emails = data.get("notification_emails") or data.get("emails") or []
-
     if not url:
         return jsonify({"error": "URL required"}), 400
 
@@ -113,13 +109,6 @@ def add_site():
         db.session.rollback()
         return jsonify({"error": "Site already exists"}), 409
 
-    for email in emails:
-        recipient = (email or "").strip()
-        if recipient and _is_valid_email(recipient):
-            db.session.add(SiteNotification(site_id=site.id, email=recipient, is_active=True))
-        elif recipient:
-            logger.warning("Skipping invalid notification email for site %s: %s", site.id, recipient)
-    
     # SaaS State Initialization
     site.app_status = "checking"
     site.uptime_status = "pending"
@@ -571,7 +560,6 @@ def create_site():
     name = (request.form.get("name") or "").strip() or None
     url = (request.form.get("url") or "").strip()
     interval = request.form.get("check_interval", type=int) or 60
-    emails_raw = request.form.get("notification_emails", "")
 
     if not url:
         flash("Website URL is required.", "error")
@@ -600,12 +588,6 @@ def create_site():
         flash("That website is already being monitored.", "error")
         return redirect(url_for("web.dashboard"))
 
-    for recipient in _parse_notification_emails(emails_raw):
-        if _is_valid_email(recipient):
-            db.session.add(SiteNotification(site_id=site.id, email=recipient, is_active=True))
-        else:
-            logger.warning("Skipping invalid notification email for site %s: %s", site.id, recipient)
-    
     # SaaS Initialization
     site.app_status = "checking"
     site.uptime_status = "pending"
@@ -668,15 +650,6 @@ def _build_dashboard_metrics(sites, response_samples):
     }
 
 
-def _parse_notification_emails(raw_value: str) -> list[str]:
-    emails = []
-    for value in (raw_value or "").replace(";", ",").split(","):
-        email = value.strip()
-        if email:
-            emails.append(email)
-    return emails
-
-
 def _serialize_site_seo(site: Site, latest_log: SEOLog | None) -> dict:
     last_fetch_valid = site.last_seo_fetch_valid
     warning = None
@@ -730,13 +703,6 @@ def _local_user_id() -> int:
         db.session.add(user)
         db.session.commit()
     return user.id
-
-
-_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
-
-
-def _is_valid_email(email: str) -> bool:
-    return bool(_EMAIL_RE.fullmatch(email.strip()))
 
 
 def _parse_interval(value, default: int, minimum: int) -> int:

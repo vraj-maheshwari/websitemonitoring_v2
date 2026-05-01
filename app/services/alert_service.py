@@ -14,13 +14,12 @@ from app.config.settings import Config
 from app.extensions import db
 from app.models.alert_history import AlertHistory
 from app.models.incident import Incident
-from app.models.site_notification import SiteNotification
-from app.services.email_service import send_email
 from app.services.incident_service import (
     open_incident_with_rca,
     update_incident_timeline,
     resolve_incident_with_timeline,
 )
+from app.services.teams_service import send_teams_alert
 from app.utils.time import now_utc
 
 logger = logging.getLogger(__name__)
@@ -118,11 +117,13 @@ def handle_uptime_transition(site, previous_status: str | None, current_status: 
     previous_status = previous_status or "PENDING"
 
     if current_status == "DOWN" and previous_status != "DOWN":
+        # Fresh DOWN transition — open incident and alert
         incident = _open_incident(site, status_code, response_time, error_message, checked_at)
         _notify_site(site, incident, "DOWN", checked_at, status_code, response_time, error_message)
         return
 
-    # Mid-incident: site still DOWN or now DEGRADED — append timeline event
+    # Mid-incident: site still DOWN — append timeline event
+    # Also re-open incident if it was lost (e.g. worker restart with no open incident)
     if previous_status == "DOWN" and current_status == "DOWN":
         incident = (
             Incident.query
@@ -130,8 +131,28 @@ def handle_uptime_transition(site, previous_status: str | None, current_status: 
             .order_by(Incident.opened_at.desc())
             .first()
         )
-        if incident:
-            update_incident_timeline(incident, current_status, status_code, response_time, error_message, checked_at)
+        if incident is None:
+            # No open incident found — worker restarted or incident was lost.
+            # Re-open and re-alert so Teams gets notified.
+            incident = _open_incident(site, status_code, response_time, error_message, checked_at)
+            _notify_site(site, incident, "DOWN", checked_at, status_code, response_time, error_message)
+        else:
+            # Incident exists — check if an alert was ever sent for it.
+            # If not (e.g. incident predates Teams integration), send one now.
+            db.session.flush()  # ensure incident.id is set
+            alert_ever_sent = (
+                AlertHistory.query
+                .filter_by(site_id=site.id, incident_id=incident.id, event_type="DOWN")
+                .first()
+            )
+            if alert_ever_sent is None:
+                logger.info(
+                    "[ALERT] site_id=%s incident_id=%s has no prior DOWN alert — sending now",
+                    site.id, incident.id,
+                )
+                _notify_site(site, incident, "DOWN", checked_at, status_code, response_time, error_message)
+            else:
+                update_incident_timeline(incident, current_status, status_code, response_time, error_message, checked_at)
         return
 
     if previous_status == "DOWN" and current_status != "DOWN":
@@ -205,47 +226,46 @@ def _notify_site(site, incident, event_type: str, checked_at: datetime,
                  status_code: int | None = None, response_time: float | None = None,
                  error_message: str | None = None, days_remaining: int | None = None,
                  seo_score: int | None = None) -> None:
-    recipients = [
-        notification.email
-        for notification in SiteNotification.query
-        .filter_by(site_id=site.id, is_active=True)
-        .all()
-    ]
-    if not recipients:
-        logger.info("No active recipients configured for site %s", site.id)
-        return
-
     if incident is not None and incident.id is None:
         db.session.flush()
     incident_id = incident.id if incident and incident.id else None
     if _cooldown_active(site.id, incident_id, event_type, checked_at):
-        logger.info("Skipping %s alert for site %s due to cooldown", event_type, site.id)
+        logger.info(
+            "[TEAMS] Cooldown active — skipping %s alert for site_id=%s incident_id=%s",
+            event_type, site.id, incident_id,
+        )
         return
 
     subject = _build_subject(site.display_name(), event_type)
     body = _build_body(site, event_type, checked_at, status_code, response_time, error_message, days_remaining, seo_score)
 
-    for recipient in recipients:
-        history = AlertHistory(
-            site_id=site.id,
-            incident_id=incident_id,
-            event_type=event_type,
-            recipient=recipient,
-            subject=subject,
-            body=body,
-            delivery_status="PENDING",
-            sent_at=checked_at,
-        )
-        db.session.add(history)
-        db.session.flush()
+    history = AlertHistory(
+        site_id=site.id,
+        incident_id=incident_id,
+        event_type=event_type,
+        recipient="Microsoft Teams",
+        subject=subject,
+        body=body,
+        delivery_status="PENDING",
+        sent_at=checked_at,
+    )
+    db.session.add(history)
+    db.session.flush()
 
-        try:
-            send_email(recipient, subject, body)
-            history.delivery_status = "SENT"
-        except Exception as exc:  # noqa: BLE001
-            history.delivery_status = "FAILED"
-            history.error_message = str(exc)
-            logger.exception("Failed to send %s alert for site %s", event_type, site.id)
+    try:
+        send_teams_alert(subject, body)
+        history.delivery_status = "SENT"
+        logger.info(
+            "[TEAMS] Alert SENT site_id=%s event=%s incident_id=%s",
+            site.id, event_type, incident_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        history.delivery_status = "FAILED"
+        history.error_message = str(exc)
+        logger.error(
+            "[TEAMS] Alert FAILED site_id=%s event=%s error=%s",
+            site.id, event_type, exc,
+        )
 
 
 def _cooldown_active(site_id: int, incident_id: int | None, event_type: str, checked_at: datetime) -> bool:
