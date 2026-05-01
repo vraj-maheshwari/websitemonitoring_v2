@@ -95,9 +95,20 @@ def resolve_incident_with_timeline(incident, status_code, response_time, error, 
     incident.resolved_status_code = status_code
     incident.resolved_response_time = response_time
     incident.resolved_error_message = error
+
+    # Normalize both datetimes to UTC-aware before subtraction
+    from datetime import timezone as _tz
+    opened = incident.opened_at
+    if opened is not None and opened.tzinfo is None:
+        opened = opened.replace(tzinfo=_tz.utc)
+    closed = checked_at
+    if closed is not None and closed.tzinfo is None:
+        closed = closed.replace(tzinfo=_tz.utc)
+
+    duration = str(closed - opened) if opened and closed else "unknown"
     logger.info(
         "[INCIDENT] site_id=%s resolved — duration=%s events=%d",
         incident.site_id,
-        str(checked_at - incident.opened_at),
+        duration,
         len(incident.timeline or []),
     )

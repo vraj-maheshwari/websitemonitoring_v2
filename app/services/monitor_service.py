@@ -33,7 +33,7 @@ def run_uptime_check(site_id: int) -> UptimeLog | None:
     checked_at = now_utc()
     
     try:
-        result = fetch_url(site.url, timeout=5.0)
+        result = fetch_url(site.url, timeout=15.0)
         
         if not result["is_up"]:
             current_status = STATUS_DOWN

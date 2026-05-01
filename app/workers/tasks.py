@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.exceptions import SoftTimeLimitExceeded
 from datetime import timedelta
 import logging
 from app import create_app
@@ -105,7 +106,14 @@ def run_ssl_check_task(site_id: int):
             release_check_lock(site, "ssl")
     return "OK"
 
-@celery.task(name="tasks.run_seo_check", bind=True, max_retries=1, default_retry_delay=60)
+@celery.task(
+    name="tasks.run_seo_check",
+    bind=True,
+    max_retries=1,
+    default_retry_delay=60,
+    soft_time_limit=300,
+    time_limit=360,
+)
 def run_seo_check_task(self, site_id: int):
     app = create_app()
     with app.app_context():
@@ -124,6 +132,7 @@ def run_seo_check_task(self, site_id: int):
         if not acquire_check_lock(site_id, "seo"):
             return "Already running"
 
+        lock_released = False
         try:
             # Sub-fix B: acquire_check_lock already set seo_status="running" via
             # bulk UPDATE — do NOT set it again here.
@@ -135,6 +144,16 @@ def run_seo_check_task(self, site_id: int):
                 logger.warning("[SEO TASK] site_id=%s fetch invalid: %s", site_id, result.get("invalidation_reason"))
             site.refresh_app_status()
             db.session.commit()
+        except SoftTimeLimitExceeded:
+            logger.error(
+                "SEO check task soft time limit exceeded for site %s", site_id
+            )
+            db.session.rollback()
+            site = db.session.get(Site, site_id)
+            if site is not None:
+                site.seo_status = "failed"
+                release_check_lock(site, "seo")
+                lock_released = True
         except Exception:
             logger.exception("[SEO TASK] site_id=%s exception", site_id)
             db.session.rollback()
@@ -143,10 +162,11 @@ def run_seo_check_task(self, site_id: int):
             site.refresh_app_status()
             db.session.commit()
         finally:
-            db.session.refresh(site)
-            if site.seo_status == "running":
-                site.seo_status = "failed"
-            release_check_lock(site, "seo")
+            if not lock_released:
+                db.session.refresh(site)
+                if site.seo_status == "running":
+                    site.seo_status = "failed"
+                release_check_lock(site, "seo")
     return "OK"
 
 @celery.task(name="tasks.dispatch_due_checks")

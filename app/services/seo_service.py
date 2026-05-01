@@ -6,6 +6,7 @@ Orchestrates deep SEO audits with fetch validation and recovery cooldowns.
 
 from datetime import datetime, timedelta, timezone
 import logging
+import os
 from urllib.parse import urljoin
 
 import httpx
@@ -24,11 +25,15 @@ from app.utils.time import now_utc
 from app.utils.tech_profiler import detect_technologies, diff_tech_stacks
 from app.utils.cwv_estimator import estimate_cwv, cwv_to_dict
 from app.utils.broken_link_checker import extract_all_links, check_broken_links, broken_link_report_to_dict
+from app.utils.lighthouse_runner import run_lighthouse_audit
 from app.services.security_service import run_security_audit
 
 logger = logging.getLogger(__name__)
 
 SEO_COOLDOWN_AFTER_RECOVERY_SECONDS = 120
+LIGHTHOUSE_ENABLED: bool = (
+    os.environ.get("LIGHTHOUSE_ENABLED", "true").strip().lower() == "true"
+)
 
 
 def should_skip_seo_for_cooldown(site) -> tuple[bool, str]:
@@ -262,25 +267,39 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
     # ── Security audit ─────────────────────────────────────────────────────
     try:
         response_headers_for_security = fetch_dict.get("headers") or {}
-        sec = run_security_audit(html_content, response_headers_for_security)
+        sec = run_security_audit(
+            html=html_content,
+            response_headers=response_headers_for_security,
+            url=site.url  # NEW — needed for CORS checks
+        )
         result["security_score"]   = sec["score"]
-        result["security_headers"] = sec["headers"]
-        result["security_issues"]  = sec["issues"]
-        result["malware_flags"]    = sec["malware"]
-        if sec["malware"]:
-            logger.warning("[SECURITY] site_id=%s malware flags: %s", site.id, sec["malware"])
+        result["security_grade"]   = sec["grade"]
+        result["security_headers"] = sec["security_headers"]
+        result["security_issues"]  = sec["security_issues"]
+        result["malware_flags"]    = sec["malware_flags"]
+        result["security_categories"] = sec["categories"]
+        result["cors_issues"]      = sec["categories"]["cors"]["issues"]
+        result["csp_issues"]       = sec["categories"]["csp"]["issues"]
+        result["mixed_content_detail"] = sec["categories"]["mixed_content"]["details"]
+        if sec["malware_flags"]:
+            logger.warning("[SECURITY] site_id=%s malware flags: %s", site.id, sec["malware_flags"])
     except Exception:  # noqa: BLE001
         result["security_score"]   = None
+        result["security_grade"]   = None
         result["security_headers"] = {}
         result["security_issues"]  = []
         result["malware_flags"]    = []
+        result["security_categories"] = {}
+        result["cors_issues"]      = []
+        result["csp_issues"]       = []
+        result["mixed_content_detail"] = {}
         logger.exception("[SEO] site_id=%s security audit failed", site.id)
 
     # Capture the old score BEFORE updating site.seo_score so the regression
     # comparison is always old-vs-new, never new-vs-new.
     old_score = site.seo_score if site.seo_score else None
 
-    _save_seo_log(site, result, db_session, checked_at)
+    seo_log = _save_seo_log(site, result, db_session, checked_at)
 
     site.seo_score = result["score"] or 0
     site.seo_state = result["status"]
@@ -311,6 +330,35 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
         logger.exception("[SEO] alert checks failed for site_id=%s", site.id)
 
     db_session.commit()
+
+    if LIGHTHOUSE_ENABLED and seo_log.fetch_valid:
+        lh = run_lighthouse_audit(site.url, timeout_ms=30_000)
+
+        seo_log.lh_lcp_ms = lh.lcp_ms
+        seo_log.lh_fcp_ms = lh.fcp_ms
+        seo_log.lh_tbt_ms = lh.tbt_ms
+        seo_log.lh_cls = lh.cls
+        seo_log.lh_ttfb_ms = lh.ttfb_ms
+        seo_log.lh_tti_ms = lh.tti_ms
+        seo_log.lh_si_ms = lh.si_ms
+        seo_log.lh_page_load_ms = lh.page_load_ms
+        seo_log.lh_performance_score = lh.performance_score
+        seo_log.lh_lcp_rating = lh.lcp_rating
+        seo_log.lh_fcp_rating = lh.fcp_rating
+        seo_log.lh_tbt_rating = lh.tbt_rating
+        seo_log.lh_cls_rating = lh.cls_rating
+        seo_log.lh_ttfb_rating = lh.ttfb_rating
+        seo_log.lh_audit_method = lh.audit_method
+        seo_log.lh_audited_at = lh.audited_at
+        seo_log.lh_error = lh.error
+
+        if lh.performance_score is not None:
+            site.lh_performance_score = lh.performance_score
+            site.lh_lcp_ms = lh.lcp_ms
+            site.lh_cls = lh.cls
+
+        db_session.commit()
+
     return result
 
 
@@ -379,9 +427,14 @@ def _save_seo_log(site: Site, result: dict, db_session, checked_at=None) -> SEOL
         links_checked=result.get("links_checked") or 0,
         # Security
         security_score=result.get("security_score"),
+        security_grade=result.get("security_grade"),
         security_headers=result.get("security_headers") or {},
         security_issues=result.get("security_issues") or [],
         malware_flags=result.get("malware_flags") or [],
+        security_categories=result.get("security_categories") or {},
+        cors_issues=result.get("cors_issues") or [],
+        csp_issues=result.get("csp_issues") or [],
+        mixed_content_detail=result.get("mixed_content_detail") or {},
         # Hybrid fetch
         render_mode=result.get("render_mode", "HTTP"),
         used_fallback=result.get("used_fallback", False),

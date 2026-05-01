@@ -11,6 +11,11 @@ from app.config.settings import Config
 
 _http_client: httpx.Client | None = None
 
+# Uptime checks use a dedicated short-lived client per check to avoid
+# connection reuse issues across Celery tasks. The global client is only
+# used for SEO resource checks (robots.txt, sitemap.xml).
+_UPTIME_TIMEOUT = 15.0   # seconds — increased from 5s; free hosting can be slow
+
 
 def get_http_client(refresh: bool = False) -> httpx.Client:
     """Returns the shared httpx.Client. If refresh=True, a new client is created."""
@@ -20,7 +25,7 @@ def get_http_client(refresh: bool = False) -> httpx.Client:
             _http_client.close()
         _http_client = httpx.Client(
             follow_redirects=True,
-            timeout=None,
+            timeout=30.0,
             verify=Config.HTTP_VERIFY_SSL,
             headers={"User-Agent": Config.HTTP_USER_AGENT},
         )
@@ -51,8 +56,15 @@ def fetch_url(url: str, timeout: float, stream_for_ttfb: bool = False, max_bytes
                 return _fetch_streaming_ttfb(url, timeout, max_bytes=max_bytes)
 
             start = time.perf_counter()
-            client = get_http_client()
-            response = client.get(url, timeout=timeout)
+            # Use a fresh client per uptime check — avoids stale connection
+            # reuse issues when the same global client is shared across tasks.
+            with httpx.Client(
+                follow_redirects=True,
+                timeout=timeout,
+                verify=Config.HTTP_VERIFY_SSL,
+                headers={"User-Agent": Config.HTTP_USER_AGENT},
+            ) as client:
+                response = client.get(url)
             total_time = time.perf_counter() - start
             return _make_result(
                 response=response,

@@ -77,6 +77,7 @@ class Config:
     SEO_CHECK_INTERVAL_SECONDS = int(os.getenv("SEO_CHECK_INTERVAL_SECONDS", "21600"))
     ALERT_COOLDOWN_MINUTES = int(os.getenv("ALERT_COOLDOWN_MINUTES", "15"))
     LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+    LIGHTHOUSE_ENABLED = os.environ.get("LIGHTHOUSE_ENABLED", "true").strip().lower() == "true"
 
     # HTTP
     HTTP_TIMEOUT = 10

@@ -24,6 +24,7 @@ from app.services.monitoring_service import prepare_site
 from app.services.report_service import generate_site_report
 from app.services.seo_service import should_skip_seo_for_cooldown, run_seo_check
 from app.services.ssl_service import run_ssl_check
+from app.utils.lighthouse_runner import compute_cwv_rating
 from app.utils.time import normalize, now_utc
 from app.utils.urls import normalize_url
 from app.workers.tasks import run_seo_check_task, run_ssl_check_task, run_uptime_check_task
@@ -162,6 +163,12 @@ def get_site(site_id):
         "latest_ssl": latest_ssl.to_dict() if latest_ssl else None,
         "latest_seo": latest_seo.to_dict() if latest_seo else None,
         "seo": _serialize_site_seo(site, latest_seo),
+        "lighthouse": {
+            "performance_score": site.lh_performance_score,
+            "lcp_ms": site.lh_lcp_ms,
+            "cls": site.lh_cls,
+            "has_data": site.lh_performance_score is not None,
+        },
     })
     return jsonify(payload)
 
@@ -332,6 +339,71 @@ def get_tech_stack(site_id):
     })
 
 
+@api_bp.route("/sites/<int:site_id>/lighthouse", methods=["GET"])
+def get_lighthouse_data(site_id: int):
+    """
+    Return Lighthouse CWV data from the most recent valid SEO scan.
+
+    Returns 404 if no Lighthouse audit has been run yet for this site.
+    """
+    site = _get_owned_site_or_404(site_id)
+
+    log = (
+        SEOLog.query
+        .filter_by(site_id=site.id, fetch_valid=True)
+        .filter(SEOLog.lh_audited_at.isnot(None))
+        .order_by(SEOLog.checked_at.desc())
+        .first()
+    )
+
+    if log is None:
+        return jsonify({
+            "error": (
+                "No Lighthouse audit available yet. "
+                "Audits run automatically during SEO checks."
+            ),
+            "site_id": site_id,
+        }), 404
+
+    return jsonify({
+        "performance_score": log.lh_performance_score,
+        "audit_method": log.lh_audit_method or "playwright_perf",
+        "audited_at": log.lh_audited_at.isoformat() if log.lh_audited_at else None,
+        "error": log.lh_error,
+        "metrics": {
+            "lcp": {
+                "value_ms": log.lh_lcp_ms,
+                "rating": log.lh_lcp_rating or compute_cwv_rating("lcp", log.lh_lcp_ms),
+            },
+            "fcp": {
+                "value_ms": log.lh_fcp_ms,
+                "rating": log.lh_fcp_rating or compute_cwv_rating("fcp", log.lh_fcp_ms),
+            },
+            "tbt": {
+                "value_ms": log.lh_tbt_ms,
+                "rating": log.lh_tbt_rating or compute_cwv_rating("tbt", log.lh_tbt_ms),
+            },
+            "cls": {
+                "value": log.lh_cls,
+                "rating": log.lh_cls_rating or compute_cwv_rating("cls", log.lh_cls),
+            },
+            "ttfb": {
+                "value_ms": log.lh_ttfb_ms,
+                "rating": log.lh_ttfb_rating or compute_cwv_rating("ttfb", log.lh_ttfb_ms),
+            },
+            "tti": {
+                "value_ms": log.lh_tti_ms,
+                "rating": "n/a",
+            },
+            "si": {
+                "value_ms": log.lh_si_ms,
+                "rating": "n/a",
+            },
+        },
+        "page_load_ms": log.lh_page_load_ms,
+    })
+
+
 @api_bp.route("/sites/<int:site_id>/analytics", methods=["GET"])
 def get_analytics(site_id):
     """Return trend analytics for a site. Query: ?days=30"""
@@ -380,11 +452,18 @@ def get_security(site_id):
     if not log:
         return jsonify({"error": "No SEO audit data yet"}), 404
     return jsonify({
-        "checked_at":      log.checked_at.isoformat(),
-        "security_score":  log.security_score,
-        "security_headers": log.security_headers or {},
-        "security_issues": log.security_issues or [],
-        "malware_flags":   log.malware_flags or [],
+        "checked_at":        log.checked_at.isoformat(),
+        # New fields
+        "security_score":    log.security_score,
+        "grade":             log.security_grade,
+        "categories":        log.security_categories or {},
+        "cors_issues":       log.cors_issues or [],
+        "csp_issues":        log.csp_issues or [],
+        "mixed_content_detail": log.mixed_content_detail or {},
+        # Backward-compatible flat fields
+        "security_headers":  log.security_headers or {},
+        "security_issues":   log.security_issues or [],
+        "malware_flags":     log.malware_flags or [],
     })
 
 

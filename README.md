@@ -12,15 +12,24 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 4. [Setup & Running](#setup--running)
 5. [Environment Variables](#environment-variables)
 6. [Architecture Overview](#architecture-overview)
-7. [Data Models](#data-models)
-8. [Check Flows — Step by Step](#check-flows--step-by-step)
-9. [SEO Scoring System](#seo-scoring-system)
-10. [Celery Tasks & Scheduling](#celery-tasks--scheduling)
-11. [Alert System](#alert-system)
-12. [API Reference](#api-reference)
-13. [Web UI](#web-ui)
-14. [State Machine](#state-machine)
-15. [Data Retention & Aggregation](#data-retention--aggregation)
+7. [Dual Extraction Methods](#dual-extraction-methods)
+8. [SaaS State Management](#saas-state-management)
+9. [Data Models](#data-models)
+10. [Check Flows — Step by Step](#check-flows--step-by-step)
+11. [SEO Scoring System](#seo-scoring-system)
+12. [Core Web Vitals Estimation](#core-web-vitals-estimation)
+13. [Technology Profiling](#technology-profiling)
+14. [Broken Link Checking](#broken-link-checking)
+15. [Security Auditing](#security-auditing)
+16. [Incident Management](#incident-management)
+17. [Celery Tasks & Scheduling](#celery-tasks--scheduling)
+18. [Alert System](#alert-system)
+19. [Analytics Service](#analytics-service)
+20. [Report Generation](#report-generation)
+21. [API Reference](#api-reference)
+22. [Web UI](#web-ui)
+23. [State Machine](#state-machine)
+24. [Data Retention & Aggregation](#data-retention--aggregation)
 
 ---
 
@@ -28,20 +37,21 @@ A production-grade monitoring platform that continuously tracks **uptime**, **SS
 
 | Feature | Detail |
 |---|---|
-| Uptime monitoring | HTTP GET every 30–60 seconds, tracks status code, response time, TTFB |
-| SSL monitoring | Checks certificate validity and days-to-expiry via raw socket/TLS |
-| SEO auditing | Deep HTML scan with 30+ signals, 0–100 weighted score |
-| Core Web Vitals | Server-side proxy estimates for LCP, FID, and CLS derived from real fetch signals |
-| Technology profiler | Detects 40+ technologies (frameworks, CMS, CDN, analytics, servers) from HTML and headers |
-| Broken link checker | Concurrent HEAD/GET check of all unique links on the page, reports 4xx/5xx |
-| Incident timeline + RCA | Full lifecycle tracking with per-check timeline events and root cause classification |
-| Analytics | 30-day uptime/SEO trends, latency distribution, incident count |
-| Security audit | HTTP security header check + malware signature scan, 0–100 score |
-| Alerting | Email on DOWN, RECOVERY, SSL expiry, SEO regression |
-| Incident tracking | Opens/resolves incident records on status transitions |
-| Daily summaries | Aggregates raw logs into daily rollups before deletion |
-| JSON export | Download full site report as structured JSON |
-| Real-time UI | Dashboard polls `/api/sites?since=` every 5 seconds |
+| **Uptime monitoring** | HTTP GET every 30–60 seconds, tracks status code, response time, TTFB |
+| **SSL monitoring** | Checks certificate validity and days-to-expiry via raw socket/TLS |
+| **SEO auditing** | Deep HTML scan with 30+ signals, 0–100 weighted score |
+| **Dual Extraction** | Two methods: HTTP (fast) + Browser (JS rendering) for SEO analysis |
+| **Core Web Vitals** | Server-side proxy estimates for LCP, FID, and CLS derived from real fetch signals |
+| **Technology profiler** | Detects 40+ technologies (frameworks, CMS, CDN, analytics, servers) from HTML and headers |
+| **Broken link checker** | Concurrent HEAD/GET check of all unique links on the page, reports 4xx/5xx |
+| **Security audit** | HTTP security header check + malware signature scan, 0–100 score |
+| **Incident timeline + RCA** | Full lifecycle tracking with per-check timeline events and root cause classification |
+| **Analytics** | 30-day uptime/SEO trends, latency distribution, incident count |
+| **Alerting** | Email on DOWN, RECOVERY, SSL expiry, SEO regression |
+| **Incident tracking** | Opens/resolves incident records on status transitions |
+| **Daily summaries** | Aggregates raw logs into daily rollups before deletion |
+| **JSON export** | Download full site report as structured JSON |
+| **Real-time UI** | Dashboard polls `/api/sites?since=` every 5 seconds |
 
 ---
 
@@ -227,9 +237,9 @@ Browser / API Client
         ▼
   Flask (routes.py)
   ┌─────────────────────────────────────────┐
-  │  web_bp  →  dashboard.html             │
-  │             site_detail.html           │
-  │  api_bp  →  JSON responses             │
+  │  web_bp  →  dashboard.html              │
+  │             site_detail.html            │
+  │  api_bp  →  JSON responses              │
   └─────────────────────────────────────────┘
         │ .delay() / .apply_async()
         ▼
@@ -238,9 +248,9 @@ Browser / API Client
         ▼
   Celery Worker (tasks.py)
   ┌─────────────────────────────────────────┐
-  │  run_uptime_check_task                 │
-  │  run_ssl_check_task                    │
-  │  run_seo_check_task                    │
+  │  run_uptime_check_task                  │
+  │  run_ssl_check_task                     │
+  │  run_seo_check_task                     │
   └─────────────────────────────────────────┘
         │                    │
         ▼                    ▼
@@ -264,6 +274,193 @@ Every 5m   → run_zombie_rescue      → resets stuck "running" tasks
 00:05 UTC  → run_daily_summary      → aggregates logs into daily summaries
 03:00 UTC  → run_retention_cycle    → deletes old logs (after backfilling summaries)
 ```
+
+---
+
+## Dual Extraction Methods
+
+The platform implements **two distinct methods** for extracting SEO data from websites:
+
+### Method 1: HTTP Fetch (Fast Path)
+
+**File:** [hybrid_fetch.py](app/utils/hybrid_fetch.py)
+
+- Uses `httpx` for fast HTTP requests (~1-3 seconds)
+- Streams response to measure TTFB (Time to First Byte)
+- No JavaScript execution
+- Default choice for most sites
+
+**Process:**
+```
+1. Send HTTP GET with realistic User-Agent
+2. Stream response chunks to measure TTFB
+3. Collect all HTML content
+4. Measure page size
+5. Check for bot-protection signatures
+6. If suspicious → trigger Method 2
+```
+
+**Key Features:**
+- Streaming support for large pages
+- Follows redirects automatically
+- Measures HTTPS redirect chain
+- Captures all response headers
+
+### Method 2: Browser Fetch (Slow Path)
+
+**File:** [hybrid_fetch.py](app/utils/hybrid_fetch.py)
+
+- Uses Playwright headless Chromium (~5-20 seconds)
+- Full JavaScript rendering
+- Executes client-side code
+- Renders SPAs and JS-heavy sites
+
+**Process:**
+```
+1. Launch headless Chromium browser
+2. Navigate to URL
+3. Wait for network idle
+4. Extract rendered HTML
+5. Measure render time as TTFB
+6. Return full page content
+```
+
+**Triggers for Browser Fallback:**
+| Signature | Example |
+|-----------|---------|
+| Bot protection | Cloudflare challenge, DDoS-Guard |
+| Placeholder pages | "Coming soon", "Parked domain" |
+| Too small content | < 2KB (likely not real page) |
+| JS-only shells | Client-rendered SPAs |
+
+### Hybrid Decision Flow
+
+```
+┌─────────────────┐
+│  Start Fetch    │
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│  HTTP Fetch     │ ── Fast (~1-3s)
+└────────┬────────┘
+         ▼
+┌─────────────────┐
+│ Needs Browser?  │
+│  - Bot protect? │
+│  - Placeholder? │
+│  - Size < 2KB?  │
+└────────┬────────┘
+    ┌────┴────┐
+   YES       NO
+    ▼         ▼
+┌────────┐ ┌────────┐
+│Browser │ │ Return │
+│Fetch   │ │  HTTP  │
+└────────┘ └────────┘
+```
+
+**Result Object** (`HybridFetchResult`):
+```python
+@dataclass
+class HybridFetchResult:
+    html:           str          # Full HTML content
+    render_mode:    str          # "HTTP" | "BROWSER" | "HTTP_BROWSER_FAILED"
+    used_fallback:  bool         # True if browser was used
+    status_code:    int | None   # HTTP status
+    ttfb:           float | None # Time to first byte (seconds)
+    response_time:  float | None # Total response time
+    page_size_kb:   float        # Page size in KB
+    https_redirect: bool         # True if redirected to HTTPS
+    headers:        dict         # Response headers
+    error:          str | None  # Error message if failed
+    fallback_reason: str | None # Why browser was triggered
+```
+
+---
+
+## SaaS State Management
+
+Each monitored site maintains **granular status tracking** for all three check types:
+
+### Status Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `app_status` | string | Overall state: `pending`, `checking`, `ready`, `partial` |
+| `uptime_status` | string | `pending` → `running` → `done` or `failed` |
+| `ssl_status` | string | `pending` → `running` → `done` or `failed` |
+| `seo_status` | string | `pending` → `running` → `done` or `failed` |
+
+### Status Transitions
+
+```
+┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐
+│ pending │ ──▶ │ running │ ──▶ │   done  │     │ failed  │
+└─────────┘     └─────────┘     └─────────┘     └─────────┘
+     │               │               │               │
+     │           (check in          (check           (check
+     │            progress)        succeeded)       failed)
+     │
+     └─────────── Initial state after site creation
+```
+
+### App Status Calculation
+
+**File:** [site.py](app/models/site.py) — `refresh_app_status()` method
+
+```python
+def refresh_app_status(self):
+    statuses = [self.uptime_status, self.ssl_status, self.seo_status]
+    
+    # All pending = just created
+    if all(s == "pending" for s in statuses):
+        self.app_status = "pending"
+        return
+    
+    # Any running = currently checking
+    if any(s == "running" for s in statuses):
+        self.app_status = "checking"
+    
+    # All done = fully operational
+    elif all(s == "done" for s in statuses):
+        self.app_status = "ready"
+    
+    # Some failed = partial
+    elif any(s == "failed" for s in statuses):
+        self.app_status = "partial"
+    
+    # Default
+    else:
+        self.app_status = "partial"
+```
+
+### Lock Management
+
+**File:** [tasks.py](app/workers/tasks.py) — `acquire_check_lock()` function
+
+Prevents duplicate task execution:
+```python
+def acquire_check_lock(site_id: int, check_type: str) -> bool:
+    status_field = getattr(Site, f"{check_type}_status")
+    updated = (
+        Site.query
+        .filter(Site.id == site_id, status_field != "running")
+        .update({
+            f"{check_type}_status": "running",
+            f"{check_type}_started_at": now_utc(),
+            "app_status": "checking",
+            "is_processing": True,
+        }, synchronize_session=False)
+    )
+    return updated == 1
+```
+
+### Zombie Task Rescue
+
+Automatically detects and recovers stuck tasks:
+- Uptime: > 10 minutes in `running` state
+- SSL: > 30 minutes in `running` state
+- SEO: > 60 minutes in `running` state
 
 ---
 
@@ -538,6 +735,425 @@ Celery Beat (every 5 min, at :05)
 
 ---
 
+## Core Web Vitals Estimation
+
+**File:** [cwv_estimator.py](app/utils/cwv_estimator.py)
+
+Real Core Web Vitals (LCP, FID, CLS) require JavaScript execution in a browser. This platform provides **server-side proxy estimates** derived from measurable signals.
+
+### LCP — Largest Contentful Paint (proxy)
+
+**Formula:**
+```
+LCP ≈ TTFB + render_delay
+render_delay = size_penalty + js_penalty + css_penalty
+```
+
+| Signal | Weight |
+|--------|--------|
+| TTFB (Time to First Byte) | Base |
+| Page size penalty | +0.5s per 1MB |
+| Blocking JS in `<head>` | +80ms per script |
+| Blocking CSS in `<head>` | +50ms per stylesheet |
+
+**Thresholds:**
+| Rating | Threshold |
+|--------|-----------|
+| Good | ≤ 2.5s |
+| Needs Improvement | 2.5s – 4.0s |
+| Poor | > 4.0s |
+
+### FID — First Input Delay (proxy)
+
+**Formula:**
+```
+FID ≈ blocking_js_weight × 100ms
+```
+
+| Signal | Weight |
+|--------|--------|
+| Total blocking JS in `<head>` | 100ms per blocking script |
+| Async/defer attributes | Reduce penalty |
+
+**Thresholds:**
+| Rating | Threshold |
+|--------|-----------|
+| Good | ≤ 100ms |
+| Needs Improvement | 100ms – 300ms |
+| Poor | > 300ms |
+
+### CLS — Cumulative Layout Shift (proxy)
+
+**Formula:**
+```
+CLS = image_shift_score + ad_iframe_score + font_shift_score
+```
+
+| Signal | Weight |
+|--------|--------|
+| Images without width/height | +0.1 per image |
+| Ads/iframes without dimensions | +0.2 per element |
+| Web fonts without display:swap | +0.05 per font |
+
+**Thresholds:**
+| Rating | Threshold |
+|--------|-----------|
+| Good | ≤ 0.1 |
+| Needs Improvement | 0.1 – 0.25 |
+| Poor | > 0.25 |
+
+### Output Structure
+
+```python
+@dataclass
+class CWVEstimate:
+    lcp_estimate_s: float
+    lcp_rating: str          # "good" | "needs_improvement" | "poor"
+    fid_estimate_ms: float
+    fid_rating: str
+    cls_estimate: float
+    cls_rating: str
+    lcp_note: str            # Explanation
+    fid_note: str
+    cls_note: str
+```
+
+---
+
+## Technology Profiling
+
+**File:** [tech_profiler.py](app/utils/tech_profiler.py)
+
+Detects **40+ technologies** from HTML source and HTTP response headers.
+
+### Detection Categories
+
+| Category | Technologies Detected |
+|----------|----------------------|
+| **JS Frameworks** | React, Next.js, Vue.js, Nuxt.js, Angular, Svelte, Ember.js, Alpine.js, jQuery, HTMX |
+| **CMS** | WordPress, Shopify, Wix, Squarespace, Webflow, Ghost, Drupal, Joomla, HubSpot |
+| **CDN** | Cloudflare, Fastly, AWS CloudFront, Vercel, Netlify, GitHub Pages |
+| **Web Servers** | Nginx, OpenResty, Apache, Caddy, LiteSpeed, IIS |
+| **Analytics** | Google Analytics, Google Tag Manager, Plausible, Fathom, Hotjar, Mixpanel |
+| **CSS Frameworks** | Tailwind CSS, Bootstrap, Bulma, Foundation |
+| **Backend** | PHP, Python/Django, Python/Flask, Ruby on Rails, Node.js/Express, ASP.NET |
+
+### Detection Method
+
+```python
+def detect_technologies(html: str, headers: dict) -> dict:
+    html_lower = html.lower()
+    
+    detected = {
+        "js_framework": [],
+        "cms": [],
+        "cdn": [],
+        "server": [],
+        "analytics": [],
+        "css_framework": [],
+        "backend": [],
+    }
+    
+    for category, name, match_fn in _SIGNATURES:
+        if match_fn(html_lower, headers):
+            detected[category].append(name)
+    
+    return detected
+```
+
+### Example Output
+
+```json
+{
+  "detected": {
+    "js_framework": ["React", "Next.js"],
+    "cms": ["WordPress"],
+    "cdn": ["Cloudflare"],
+    "server": ["Nginx"],
+    "analytics": ["Google Analytics", "Google Tag Manager"],
+    "css_framework": ["Tailwind CSS"],
+    "backend": ["PHP"]
+  },
+  "count": 8
+}
+```
+
+---
+
+## Broken Link Checking
+
+**File:** [broken_link_checker.py](app/utils/broken_link_checker.py)
+
+Crawls all internal and external links on a page and checks each for HTTP errors.
+
+### Features
+
+- **Max 500 links** per page (configurable)
+- **Concurrent checking** via ThreadPoolExecutor (12 workers)
+- **HEAD first** → falls back to GET on 405
+- **8 second timeout** per link
+- **Max 3 redirects** followed
+- **Skips** mailto:, tel:, javascript:, #fragments
+
+### Process Flow
+
+```
+1. Extract all <a href> links from HTML
+2. Classify as internal/external
+3. Deduplicate URLs
+4. Limit to max_links (500)
+5. For each link:
+   a. Send HEAD request
+   b. If 405 → send GET request
+   c. Check status code (4xx/5xx = broken)
+6. Aggregate results
+```
+
+### Output Structure
+
+```python
+@dataclass
+class BrokenLinkReport:
+    total_checked: int
+    broken_count: int
+    broken: list[LinkResult]      # 4xx/5xx or connection errors
+    ok: list[LinkResult]          # Working links
+    skipped: int                  # Over limit
+    error_message: str | None     # Global error
+
+@dataclass
+class LinkResult:
+    url: str
+    status_code: int | None
+    is_broken: bool
+    error: str | None
+    link_type: str                # "internal" | "external"
+    anchor_text: str
+```
+
+---
+
+## Security Auditing
+
+**File:** [security_service.py](app/services/security_service.py)
+
+Analyzes HTTP security headers and scans for malware signatures.
+
+### Security Headers (100 points total)
+
+| Header | Points | Purpose |
+|--------|--------|---------|
+| Strict-Transport-Security | 20 | Enforces HTTPS |
+| X-Frame-Options | 20 | Prevents clickjacking |
+| X-Content-Type-Options | 20 | Prevents MIME sniffing |
+| X-XSS-Protection | 20 | Legacy XSS filter |
+| Content-Security-Policy | 20 | Prevents XSS/injection |
+
+### Malware Signatures
+
+Detects obfuscated malicious code:
+
+| Pattern | Description |
+|---------|-------------|
+| `eval(base64_decode(...))` | Obfuscated PHP execution |
+| `eval(unescape(...))` | Obfuscated JS execution |
+| `document.write(unescape(...))` | JS injection |
+| Crypto-miner references | coinhive, cryptonight |
+| External scripts from .ru | Suspicious foreign domains |
+| `String.fromCharCode` | Obfuscation technique |
+| Hex-encoded sequences | `\x41\x42` patterns |
+
+### Output Structure
+
+```python
+def run_security_audit(html: str, response_headers: dict) -> dict:
+    return {
+        "score": int,              # 0-100
+        "headers": {
+            "strict-transport-security": bool,
+            "x-frame-options": bool,
+            "x-content-type-options": bool,
+            "x-xss-protection": bool,
+            "content-security-policy": bool,
+        },
+        "issues": [
+            "Missing X-Frame-Options",
+            "Missing Content-Security-Policy",
+            ...
+        ],
+        "malware": [
+            "eval(base64_decode) — obfuscated PHP execution",
+            ...
+        ]
+    }
+```
+
+---
+
+## Incident Management
+
+**File:** [incident_service.py](app/services/incident_service.py)
+
+Full lifecycle tracking with timeline events and root cause classification.
+
+### Root Cause Categories
+
+| Category | Detection Rule |
+|----------|----------------|
+| `TIMEOUT` | Error contains "timeout" |
+| `DNS` | Error contains "dns", "name resolution", "getaddrinfo" |
+| `SERVER` | HTTP status code ≥ 500 |
+| `CLIENT` | HTTP status code ≥ 400 |
+| `CONNECTION` | Error contains "connection refused" |
+| `UNKNOWN` | Default fallback |
+
+### Timeline Events
+
+Each incident maintains a timeline of all checks during the downtime:
+
+```python
+def make_timeline_event(
+    status: str,           # "DOWN", "DEGRADED", "UP"
+    checked_at: datetime,
+    response_time: float | None,
+    status_code: int | None,
+    error: str | None,
+) -> dict:
+    return {
+        "status": status,
+        "time": checked_at.isoformat(),
+        "response_time": round(response_time, 3),
+        "status_code": status_code,
+        "error": error,
+    }
+```
+
+### Incident Lifecycle
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   OPEN      │ ──▶ │   UPDATE    │ ──▶ │  RESOLVED   │
+└─────────────┘     └─────────────┘     └─────────────┘
+     │                    │                    │
+     │                    │                    │
+  Site goes DOWN      Site still DOWN      Site recovers
+  - Set root_cause    - Append timeline     - Append "UP" event
+  - Seed timeline     - Update duration     - Set resolved_at
+```
+
+### Data Model
+
+```python
+class Incident(db.Model):
+    site_id = db.Column(db.Integer, ForeignKey("sites.id"))
+    status = db.Column(db.String(32))        # "OPEN" | "RESOLVED"
+    root_cause = db.Column(db.String(32))   # "TIMEOUT" | "DNS" | ...
+    opened_at = db.Column(db.DateTime)
+    resolved_at = db.Column(db.DateTime, nullable=True)
+    timeline = db.Column(db.JSON)           # List of timeline events
+```
+
+---
+
+## Analytics Service
+
+**File:** [analytics_service.py](app/services/analytics_service.py)
+
+Converts stored logs and daily summaries into trend data.
+
+### API Output
+
+```python
+def get_site_analytics(site_id: int, days: int = 30) -> dict:
+    return {
+        "uptime_trend": [
+            {"date": "2024-01-01", "uptime_pct": 99.8},
+            {"date": "2024-01-02", "uptime_pct": 99.9},
+            ...
+        ],
+        "seo_trend": [
+            {"date": "2024-01-01", "avg_score": 72},
+            {"date": "2024-01-02", "avg_score": 74},
+            ...
+        ],
+        "latency_distribution": {
+            "fast": 145,    # < 1s
+            "medium": 23,   # 1-3s
+            "slow": 5       # > 3s
+        },
+        "avg_response_time_ms": 456.2,
+        "total_incidents": 3,
+        "period_days": 30
+    }
+```
+
+### Latency Buckets
+
+| Bucket | Threshold |
+|--------|-----------|
+| Fast | < 1.0 seconds |
+| Medium | 1.0 – 3.0 seconds |
+| Slow | > 3.0 seconds |
+
+---
+
+## Report Generation
+
+**File:** [report_service.py](app/services/report_service.py)
+
+Generates comprehensive JSON reports for sites.
+
+### Report Structure
+
+```python
+def generate_site_report(site_id: int) -> dict:
+    return {
+        "generated_at": "2024-01-15T10:30:00Z",
+        "site": {
+            "id": 1,
+            "name": "Example Site",
+            "url": "https://example.com",
+            "created_at": "2024-01-01T00:00:00Z"
+        },
+        "current_status": {
+            "app_status": "ready",
+            "uptime_status": "done",
+            "ssl_status": "done",
+            "seo_status": "done"
+        },
+        "uptime": {
+            "current_status": "UP",
+            "last_response_time": 0.456,
+            "last_status_code": 200,
+            "last_ttfb": 0.123,
+            "latest_log": {...},
+            "recent_history": [...]
+        },
+        "ssl": {
+            "state": "VALID",
+            "issuer": "Let's Encrypt",
+            "expiry_date": "2024-06-15T00:00:00Z",
+            "days_remaining": 75,
+            "latest_log": {...}
+        },
+        "seo": {
+            "score": 72,
+            "state": "GOOD",
+            "latest_log": {...}
+        },
+        "configuration": {
+            "uptime_check_interval": 60,
+            "ssl_check_interval": 86400,
+            "seo_check_interval": 604800,
+            "next_uptime_check_at": "...",
+            "next_ssl_check_at": "...",
+            "next_seo_check_at": "..."
+        }
+    }
+```
+
+---
+
 ## SEO Scoring System
 
 Each category is scored **0–100 internally**, then multiplied by its weight to contribute to the final score.
@@ -792,7 +1408,7 @@ Rendered by `site_detail.html`. Data passed:
 ```
                     ┌─────────────────────────────────────┐
                     │                                     │
-  Site created  →  pending  →  checking  →  ready        │
+  Site created  →  pending  →  checking  →  ready         │
                                     │                     │
                                     └──→  partial  ───────┘
                                          (any failed)

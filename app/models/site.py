@@ -75,6 +75,11 @@ class Site(db.Model):
     last_seo_fetch_valid = db.Column(db.Boolean, default=True)
     last_downtime_ended_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
+    # ── Denormalized CWV (from latest successful Playwright audit) ─
+    lh_performance_score = db.Column(db.Integer, nullable=True)
+    lh_lcp_ms            = db.Column(db.Float,   nullable=True)
+    lh_cls               = db.Column(db.Float,   nullable=True)
+
     # Relationships
     uptime_logs = db.relationship("UptimeLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     ssl_logs = db.relationship("SSLLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
@@ -106,6 +111,12 @@ class Site(db.Model):
             "seo_state": self.seo_state,
             "seo_score": self.seo_score,
             "last_seo_fetch_valid": self.last_seo_fetch_valid,
+            "lighthouse": {
+                "performance_score": self.lh_performance_score,
+                "lcp_ms": self.lh_lcp_ms,
+                "cls": self.lh_cls,
+                "has_data": self.lh_performance_score is not None,
+            },
             "last_uptime_check_at": self.last_uptime_check_at.isoformat() if self.last_uptime_check_at else None,
             "last_ssl_check_at": self.last_ssl_check_at.isoformat() if self.last_ssl_check_at else None,
             "last_seo_check_at": self.last_seo_check_at.isoformat() if self.last_seo_check_at else None,
@@ -140,7 +151,7 @@ class Site(db.Model):
         checks = (
             ("uptime", cls.uptime_status, cls.uptime_started_at, now - timedelta(minutes=10)),
             ("ssl", cls.ssl_status, cls.ssl_started_at, now - timedelta(minutes=30)),
-            ("seo", cls.seo_status, cls.seo_started_at, now - timedelta(minutes=60)),
+            ("seo", cls.seo_status, cls.seo_started_at, now - timedelta(minutes=90)),
         )
 
         for check_type, status_field, started_field, cutoff in checks:

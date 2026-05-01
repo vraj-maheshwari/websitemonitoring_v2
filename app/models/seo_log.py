@@ -107,9 +107,33 @@ class SEOLog(db.Model):
 
     # Security audit
     security_score   = db.Column(db.Integer, nullable=True)
+    security_grade  = db.Column(db.String(2), nullable=True)   # "A", "B", "C", "D", "F"
     security_headers = db.Column(db.JSON,    nullable=True)  # {header_name: bool}
     security_issues  = db.Column(db.JSON,    nullable=True)  # list of issue strings
     malware_flags    = db.Column(db.JSON,    nullable=True)  # list of matched signatures
+    security_categories = db.Column(db.JSON, nullable=True)  # full categories dict
+    cors_issues      = db.Column(db.JSON,    nullable=True)  # CORS-specific issues
+    csp_issues       = db.Column(db.JSON,    nullable=True)  # CSP-specific issues
+    mixed_content_detail = db.Column(db.JSON, nullable=True)  # { http_scripts, http_images, ... }
+
+    # ── Real CWV via Playwright (lighthouse_runner.py) ────────────
+    lh_lcp_ms            = db.Column(db.Float,      nullable=True)
+    lh_fcp_ms            = db.Column(db.Float,      nullable=True)
+    lh_tbt_ms            = db.Column(db.Float,      nullable=True)
+    lh_cls               = db.Column(db.Float,      nullable=True)
+    lh_ttfb_ms           = db.Column(db.Float,      nullable=True)
+    lh_tti_ms            = db.Column(db.Float,      nullable=True)
+    lh_si_ms             = db.Column(db.Float,      nullable=True)
+    lh_page_load_ms      = db.Column(db.Float,      nullable=True)
+    lh_performance_score = db.Column(db.Integer,    nullable=True)
+    lh_lcp_rating        = db.Column(db.String(20), nullable=True)
+    lh_fcp_rating        = db.Column(db.String(20), nullable=True)
+    lh_tbt_rating        = db.Column(db.String(20), nullable=True)
+    lh_cls_rating        = db.Column(db.String(20), nullable=True)
+    lh_ttfb_rating       = db.Column(db.String(20), nullable=True)
+    lh_audit_method      = db.Column(db.String(32), nullable=True)
+    lh_audited_at        = db.Column(db.DateTime,   nullable=True)
+    lh_error             = db.Column(db.Text,       nullable=True)
 
     def to_dict(self) -> dict:
         return {
@@ -162,9 +186,30 @@ class SEOLog(db.Model):
             "links_checked":     self.links_checked,
             # Security
             "security_score":   self.security_score,
+            "security_grade":  self.security_grade,
             "security_headers": self.security_headers or {},
             "security_issues":  self.security_issues or [],
             "malware_flags":    self.malware_flags or [],
+            "security_categories": self.security_categories or {},
+            "cors_issues":      self.cors_issues or [],
+            "csp_issues":       self.csp_issues or [],
+            "mixed_content_detail": self.mixed_content_detail or {},
+            "lighthouse": {
+                "performance_score": self.lh_performance_score,
+                "audit_method": self.lh_audit_method,
+                "audited_at": self.lh_audited_at.isoformat() if self.lh_audited_at else None,
+                "error": self.lh_error,
+                "metrics": {
+                    "lcp": {"value_ms": self.lh_lcp_ms, "rating": self.lh_lcp_rating},
+                    "fcp": {"value_ms": self.lh_fcp_ms, "rating": self.lh_fcp_rating},
+                    "tbt": {"value_ms": self.lh_tbt_ms, "rating": self.lh_tbt_rating},
+                    "cls": {"value": self.lh_cls, "rating": self.lh_cls_rating},
+                    "ttfb": {"value_ms": self.lh_ttfb_ms, "rating": self.lh_ttfb_rating},
+                    "tti": {"value_ms": self.lh_tti_ms, "rating": "n/a"},
+                    "si": {"value_ms": self.lh_si_ms, "rating": "n/a"},
+                },
+                "page_load_ms": self.lh_page_load_ms,
+            },
         }
 
     def __repr__(self) -> str:
