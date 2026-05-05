@@ -17,3 +17,4 @@ pytest==9.0.3
 playwright==1.44.0
 reportlab==4.0.7
 dnspython==2.6.1
+gunicorn
