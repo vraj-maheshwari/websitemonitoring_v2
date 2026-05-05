@@ -135,6 +135,24 @@ pytest
 
 ## Deployment
 
+### Railway Deployment (Recommended)
+
+For Railway deployment, see [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md) for detailed instructions.
+
+**Quick Options:**
+
+**Option 1: Single Service**
+- Use the root `railway.json` for a combined web + worker + beat service
+- Suitable for smaller deployments
+
+**Option 2: Multiple Services**
+- Web Service: `python run.py`
+- Worker Service: `celery -A app.workers.tasks.celery worker --loglevel=info`
+- Beat Service: `celery -A app.workers.tasks.celery beat --loglevel=info`
+- Better scalability and resource management
+
+### Manual Production Deployment
+
 For production deployment:
 
 1. Use PostgreSQL instead of SQLite by setting `DATABASE_URL` to a PostgreSQL connection string (e.g., `postgresql://user:pass@host:port/db`).
