@@ -29,6 +29,11 @@
 {%- set avg_ms       = (metrics.avg_response * 1000) | round(0) | int if metrics.avg_response else none -%}
 {%- set down_sites   = site_cards | selectattr('current_status','equalto','DOWN') | list -%}
 {%- set ssl_warn     = site_cards | selectattr('ssl_days_remaining','ne',none) | selectattr('ssl_days_remaining','lt',14) | list -%}
+{%- set dns_failed   = site_cards | selectattr('dns_status','equalto','failed') | list -%}
+{%- set dns_hijack   = site_cards | selectattr('dns_hijack_suspected') | list -%}
+{%- set dns_nschange = site_cards | selectattr('dns_ns_changed') | list -%}
+{%- set dns_issue_count = (dns_failed | length) + (dns_hijack | length) + (dns_nschange | length) -%}
+{%- set dns_checked = site_cards | selectattr('last_dns_check_at','ne',none) | list | length -%}
 
 {# ── 1. GLOBAL STATUS BAR ── #}
 <div class="status-bar">
@@ -121,6 +126,28 @@
   <div class="metric-card">
     <div class="metric-card-top">
       <div>
+        <div class="metric-label">DNS Health</div>
+        <div class="metric-value {% if dns_issue_count == 0 and dns_checked > 0 %}val-green{% elif dns_issue_count == 0 %}val-muted{% elif dns_issue_count <= 2 %}val-yellow{% else %}val-red{% endif %}">
+          {% if dns_issue_count == 0 and dns_checked > 0 %}OK{% elif dns_issue_count == 0 %}&mdash;{% else %}{{ dns_issue_count }}{% endif %}
+        </div>
+      </div>
+      <div class="metric-card-icon {% if dns_issue_count == 0 and dns_checked > 0 %}green{% elif dns_issue_count == 0 %}yellow{% elif dns_issue_count <= 2 %}yellow{% else %}red{% endif %}">DNS</div>
+    </div>
+    <div class="metric-footer">
+      <span class="pill {% if dns_issue_count == 0 and dns_checked > 0 %}pill-green{% elif dns_issue_count == 0 %}pill-gray{% elif dns_issue_count <= 2 %}pill-yellow{% else %}pill-red{% endif %}">
+        {% if dns_checked == 0 %}No checks yet{% elif dns_issue_count == 0 %}{{ dns_checked }} checked{% else %}{{ dns_issue_count }} issue(s){% endif %}
+      </span>
+    </div>
+    <div class="metric-insight">
+      {% if dns_checked == 0 %}DNS checks have not completed yet.
+      {% elif dns_issue_count == 0 %}DNS resolution and nameservers look stable.
+      {% else %}Review failed resolution, IP, or nameserver changes.{% endif %}
+    </div>
+  </div>
+
+  <div class="metric-card">
+    <div class="metric-card-top">
+      <div>
         <div class="metric-label">Avg Latency</div>
         <div class="metric-value {% if avg_ms and avg_ms < 800 %}val-green{% elif avg_ms and avg_ms < 2000 %}val-yellow{% elif avg_ms %}val-red{% else %}val-muted{% endif %}">
           {% if avg_ms %}{{ avg_ms }}<span class="val-muted" style="font-size:1rem;font-weight:500;">ms</span>{% else %}—{% endif %}
@@ -147,12 +174,12 @@
   <div class="dash-main">
 
     {# Active Issues — only shown when there are problems #}
-    {% if down_sites or ssl_warn %}
+    {% if down_sites or ssl_warn or dns_failed or dns_hijack or dns_nschange %}
     <div class="card">
       <div class="section-head">
         <div>
           <div class="label">Active Issues</div>
-          <h2>{{ (down_sites | length) + (ssl_warn | length) }} issue(s) require attention</h2>
+          <h2>{{ (down_sites | length) + (ssl_warn | length) + dns_issue_count }} issue(s) require attention</h2>
         </div>
       </div>
       <div class="activity-list">
@@ -186,6 +213,54 @@
             </div>
           </div>
           <span class="pill pill-yellow">{{ site.ssl_days_remaining }}d</span>
+        </div>
+        {% endfor %}
+        {% for site in dns_failed %}
+        <div class="activity-item">
+          <div class="dot dot-red" style="margin-top:3px;"></div>
+          <div class="activity-body">
+            <div class="activity-title">
+              <span class="pill pill-red" style="margin-right:6px;">HIGH</span>
+              DNS failed - {{ site.display_name() }}
+            </div>
+            <div class="small muted" style="margin-top:2px;">
+              {{ site.dns_last_error or 'DNS did not resolve' }} &middot;
+              <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="val-blue">Inspect &rarr;</a>
+            </div>
+          </div>
+          <span class="pill pill-red">DNS</span>
+        </div>
+        {% endfor %}
+        {% for site in dns_hijack %}
+        <div class="activity-item">
+          <div class="dot dot-yellow" style="margin-top:3px;"></div>
+          <div class="activity-body">
+            <div class="activity-title">
+              <span class="pill pill-yellow" style="margin-right:6px;">MEDIUM</span>
+              DNS IP changed - {{ site.display_name() }}
+            </div>
+            <div class="small muted" style="margin-top:2px;">
+              Latest IPs: {{ (site.dns_last_ips or []) | join(', ') or 'Unknown' }} &middot;
+              <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="val-blue">View &rarr;</a>
+            </div>
+          </div>
+          <span class="pill pill-yellow">IP</span>
+        </div>
+        {% endfor %}
+        {% for site in dns_nschange %}
+        <div class="activity-item">
+          <div class="dot dot-yellow" style="margin-top:3px;"></div>
+          <div class="activity-body">
+            <div class="activity-title">
+              <span class="pill pill-yellow" style="margin-right:6px;">MEDIUM</span>
+              Nameserver changed - {{ site.display_name() }}
+            </div>
+            <div class="small muted" style="margin-top:2px;">
+              Current NS: {{ (site.dns_last_ns or []) | join(', ') or 'Unknown' }} &middot;
+              <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="val-blue">View &rarr;</a>
+            </div>
+          </div>
+          <span class="pill pill-yellow">NS</span>
         </div>
         {% endfor %}
       </div>
@@ -245,8 +320,15 @@
               </strong>
             </div>
             <div class="site-metric-mini">
-              <div class="label">Status</div>
-              <strong class="val-text2" style="text-transform:capitalize;">{{ site.app_status }}</strong>
+              <div class="label">DNS</div>
+              <strong class="{% if site.dns_status == 'failed' or site.dns_hijack_suspected or site.dns_ns_changed %}val-red{% elif site.dns_status == 'done' and site.dns_resolved %}val-green{% elif site.dns_status == 'running' %}val-yellow{% else %}val-muted{% endif %}">
+                {% if site.dns_status == 'failed' %}Failed
+                {% elif site.dns_hijack_suspected %}IP change
+                {% elif site.dns_ns_changed %}NS change
+                {% elif site.dns_status == 'done' and site.dns_resolved %}OK
+                {% elif site.dns_status == 'running' %}Checking
+                {% else %}&mdash;{% endif %}
+              </strong>
             </div>
           </div>
 

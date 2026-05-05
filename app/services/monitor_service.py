@@ -90,7 +90,6 @@ def run_uptime_check(site_id: int) -> UptimeLog | None:
 
     except Exception as exc:
         logger.exception("Uptime check failed for %s", site.url)
-        site.uptime_status = "failed"
         raise
 
 

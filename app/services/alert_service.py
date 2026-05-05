@@ -81,16 +81,29 @@ def check_ssl_alerts(site, is_valid: bool,
         # Both EXPIRED and EXPIRY_WARNING are rate-limited to once per day.
         if _daily_alert_sent(site.id, event_type, checked_at):
             return
-        _send_alert(
-            level="WARNING",
-            subject=f"[SSL EXPIRING] {site.url} — {days_remaining} days left",
-            body=(
-                f"Website:     {site.url}\n"
-                f"Expiry date: {expiry_date}\n"
-                f"Days left:   {days_remaining}\n"
-                f"Time:        {checked_at.isoformat()}"
-            ),
-        )
+        
+        if days_remaining < 0:
+            _send_alert(
+                level="CRITICAL",
+                subject=f"[SSL EXPIRED] {site.url} — expired {-days_remaining} days ago",
+                body=(
+                    f"Website:     {site.url}\n"
+                    f"Expiry date: {expiry_date}\n"
+                    f"Expired:     {-days_remaining} days ago\n"
+                    f"Time:        {checked_at.isoformat()}"
+                ),
+            )
+        else:
+            _send_alert(
+                level="WARNING",
+                subject=f"[SSL EXPIRING] {site.url} — {days_remaining} days left",
+                body=(
+                    f"Website:     {site.url}\n"
+                    f"Expiry date: {expiry_date}\n"
+                    f"Days left:   {days_remaining}\n"
+                    f"Time:        {checked_at.isoformat()}"
+                ),
+            )
         _notify_site(site, None, event_type, checked_at, days_remaining=days_remaining)
 
 
@@ -109,6 +122,28 @@ def check_seo_alerts(site, score: int, status: str, checked_at: datetime,
             body=f"Website: {site.url}\nPrevious score: {old_score}\nCurrent score: {score}\nStatus: {status}\nTime: {checked_at.isoformat()}",
         )
         _notify_site(site, None, "SEO_REGRESSION", checked_at, seo_score=score)
+
+
+def check_dns_alerts(site, result: dict, checked_at: datetime) -> None:
+    if result.get("hijack_suspected"):
+        _notify_site(
+            site,
+            None,
+            "DNS_HIJACK",
+            checked_at,
+            expected_ips=result.get("expected_ips") or [],
+            new_ips=result.get("new_ips") or [],
+        )
+
+    if result.get("ns_changed"):
+        _notify_site(
+            site,
+            None,
+            "DNS_NS_CHANGE",
+            checked_at,
+            added_ns=result.get("added_ns") or [],
+            removed_ns=result.get("removed_ns") or [],
+        )
 
 
 def handle_uptime_transition(site, previous_status: str | None, current_status: str,
@@ -225,7 +260,9 @@ def _resolve_incident(site, status_code, response_time, error_message, checked_a
 def _notify_site(site, incident, event_type: str, checked_at: datetime,
                  status_code: int | None = None, response_time: float | None = None,
                  error_message: str | None = None, days_remaining: int | None = None,
-                 seo_score: int | None = None) -> None:
+                 seo_score: int | None = None, expected_ips: list[str] | None = None,
+                 new_ips: list[str] | None = None, added_ns: list[str] | None = None,
+                 removed_ns: list[str] | None = None) -> None:
     if incident is not None and incident.id is None:
         db.session.flush()
     incident_id = incident.id if incident and incident.id else None
@@ -237,7 +274,20 @@ def _notify_site(site, incident, event_type: str, checked_at: datetime,
         return
 
     subject = _build_subject(site.display_name(), event_type)
-    body = _build_body(site, event_type, checked_at, status_code, response_time, error_message, days_remaining, seo_score)
+    body = _build_body(
+        site,
+        event_type,
+        checked_at,
+        status_code,
+        response_time,
+        error_message,
+        days_remaining,
+        seo_score,
+        expected_ips,
+        new_ips,
+        added_ns,
+        removed_ns,
+    )
 
     history = AlertHistory(
         site_id=site.id,
@@ -311,12 +361,18 @@ def _build_subject(site_name: str, event_type: str) -> str:
         return f"[SEO CRITICAL] {site_name}"
     if event_type == "SEO_WARNING":
         return f"[SEO WARNING] {site_name}"
+    if event_type == "DNS_HIJACK":
+        return f"[DNS HIJACK SUSPECTED] {site_name}"
+    if event_type == "DNS_NS_CHANGE":
+        return f"[DNS NS CHANGE] {site_name}"
     return f"[ALERT] {site_name}: {event_type}"
 
 
 def _build_body(site, event_type: str, checked_at: datetime, status_code: int | None,
                 response_time: float | None, error_message: str | None,
-                days_remaining: int | None = None, seo_score: int | None = None) -> str:
+                days_remaining: int | None = None, seo_score: int | None = None,
+                expected_ips: list[str] | None = None, new_ips: list[str] | None = None,
+                added_ns: list[str] | None = None, removed_ns: list[str] | None = None) -> str:
     body = (
         f"Site name: {site.display_name()}\n"
         f"URL: {site.url}\n"
@@ -333,6 +389,14 @@ def _build_body(site, event_type: str, checked_at: datetime, status_code: int | 
 
     if event_type in ["SEO_CRITICAL", "SEO_WARNING", "SEO_REGRESSION"]:
         body += f"SEO Score: {seo_score}\n"
+
+    if event_type == "DNS_HIJACK":
+        body += f"Previous IPs: {', '.join(expected_ips or []) or 'N/A'}\n"
+        body += f"New unexpected IPs: {', '.join(new_ips or []) or 'N/A'}\n"
+
+    if event_type == "DNS_NS_CHANGE":
+        body += f"Added NS records: {', '.join(added_ns or []) or 'N/A'}\n"
+        body += f"Removed NS records: {', '.join(removed_ns or []) or 'N/A'}\n"
 
     if error_message:
         body += f"Error: {error_message}\n"

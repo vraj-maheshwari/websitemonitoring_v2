@@ -5,13 +5,16 @@ import logging
 from app import create_app
 from app.config.settings import Config
 from app.extensions import db
+from app.models.dns_log import DNSLog
 from app.models.site import Site
 from app.services.monitor_service import run_uptime_check as run_uptime_service
-from app.services.monitoring_service import CHECK_SEO, CHECK_SSL, CHECK_UPTIME, get_due_site_ids
+from app.services.alert_service import check_dns_alerts
+from app.services.monitoring_service import CHECK_DNS, CHECK_SECURITY, CHECK_SEO, CHECK_SSL, CHECK_UPTIME, get_due_site_ids, schedule_next_run
 from app.services.retention_service import run_retention_cycle as run_retention_service
 from app.services.seo_service import should_skip_seo_for_cooldown, run_seo_check as run_seo_service
 from app.services.summary_service import run_daily_summary as run_daily_summary_service
 from app.services.ssl_service import run_ssl_check as run_ssl_service
+from app.services.security_service import run_security_check as run_security_service
 from app.utils.time import now_utc
 
 logger = logging.getLogger(__name__)
@@ -169,6 +172,94 @@ def run_seo_check_task(self, site_id: int):
                 release_check_lock(site, "seo")
     return "OK"
 
+@celery.task(name="tasks.run_security_check", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def run_security_check_task(site_id: int):
+    app = create_app()
+    with app.app_context():
+        site = db.session.get(Site, site_id)
+        if not site: return "Site not found"
+
+        if not acquire_check_lock(site_id, "security"):
+            return "Already running"
+
+        try:
+            run_security_service(site_id)
+        except Exception:
+            db.session.rollback()
+            site = db.session.get(Site, site_id)
+            site.security_status = "failed"
+            site.refresh_app_status()
+            db.session.commit()
+            raise
+        finally:
+            db.session.refresh(site)
+            if site.security_status == "running":
+                site.security_status = "failed"
+            release_check_lock(site, "security")
+    return "OK"
+
+
+@celery.task(name="tasks.run_dns_check", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def run_dns_check_task(site_id: int):
+    app = create_app()
+    with app.app_context():
+        site = db.session.get(Site, site_id)
+        if not site:
+            return "Site not found"
+
+        if not acquire_check_lock(site_id, "dns"):
+            return "Already running"
+
+        try:
+            from app.services.dns_service import run_dns_check
+
+            checked_at = now_utc()
+            result = run_dns_check(site)
+            log = DNSLog(
+                site_id=site.id,
+                checked_at=checked_at,
+                resolved=result.get("resolved"),
+                resolution_time_ms=result.get("resolution_time_ms"),
+                ip_addresses=result.get("ip_addresses") or [],
+                nameservers=result.get("nameservers") or [],
+                mx_records=result.get("mx_records") or [],
+                hijack_suspected=result.get("hijack_suspected", False),
+                new_ips=result.get("new_ips") or [],
+                removed_ips=result.get("removed_ips") or [],
+                ns_changed=result.get("ns_changed", False),
+                added_ns=result.get("added_ns") or [],
+                removed_ns=result.get("removed_ns") or [],
+                error_message=result.get("error"),
+            )
+            db.session.add(log)
+
+            site.dns_resolved = result.get("resolved")
+            site.dns_resolution_time_ms = result.get("resolution_time_ms")
+            site.dns_last_ips = result.get("ip_addresses") or []
+            site.dns_last_ns = result.get("nameservers") or []
+            site.dns_hijack_suspected = result.get("hijack_suspected", False)
+            site.dns_ns_changed = result.get("ns_changed", False)
+            site.dns_last_error = result.get("error")
+            site.dns_status = "done" if result.get("resolved") else "failed"
+            schedule_next_run(site, CHECK_DNS, checked_at)
+            check_dns_alerts(site, result, checked_at)
+            site.refresh_app_status()
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            site = db.session.get(Site, site_id)
+            if site is not None:
+                site.dns_status = "failed"
+                site.refresh_app_status()
+                db.session.commit()
+            raise
+        finally:
+            db.session.refresh(site)
+            if site.dns_status == "running":
+                site.dns_status = "failed"
+            release_check_lock(site, "dns")
+    return "OK"
+
 @celery.task(name="tasks.dispatch_due_checks")
 def dispatch_due_checks():
     with create_app().app_context():
@@ -176,6 +267,8 @@ def dispatch_due_checks():
             CHECK_UPTIME: _dispatch_for_type(CHECK_UPTIME, run_uptime_check_task),
             CHECK_SSL: _dispatch_for_type(CHECK_SSL, run_ssl_check_task),
             CHECK_SEO: _dispatch_for_type(CHECK_SEO, run_seo_check_task),
+            CHECK_SECURITY: _dispatch_for_type(CHECK_SECURITY, run_security_check_task),
+            CHECK_DNS: _dispatch_for_type(CHECK_DNS, run_dns_check_task),
         }
 
 
@@ -197,14 +290,28 @@ def run_due_seo_checks():
         return _dispatch_for_type(CHECK_SEO, run_seo_check_task)
 
 
+@celery.task(name="tasks.run_due_security_checks")
+def run_due_security_checks():
+    with create_app().app_context():
+        return _dispatch_for_type(CHECK_SECURITY, run_security_check_task)
+
+
+@celery.task(name="tasks.run_due_dns_checks")
+def run_due_dns_checks():
+    with create_app().app_context():
+        return _dispatch_for_type(CHECK_DNS, run_dns_check_task)
+
+
 @celery.task(name="tasks.run_zombie_rescue")
 def run_zombie_rescue_task():
     with create_app().app_context():
-        rescued = {"uptime": 0, "ssl": 0, "seo": 0}
+        rescued = {"uptime": 0, "ssl": 0, "seo": 0, "security": 0, "dns": 0}
         thresholds = {
             "uptime": timedelta(minutes=10),
             "ssl": timedelta(minutes=30),
             "seo": timedelta(minutes=90),
+            "security": timedelta(minutes=30),
+            "dns": timedelta(minutes=10),
         }
         now = now_utc()
         for check_type, threshold in thresholds.items():

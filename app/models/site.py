@@ -27,6 +27,8 @@ class Site(db.Model):
     uptime_check_interval = db.Column(db.Integer, default=60, nullable=False)
     ssl_check_interval = db.Column(db.Integer, default=86400, nullable=False)
     seo_check_interval = db.Column(db.Integer, default=604800, nullable=False)
+    security_check_interval = db.Column(db.Integer, default=86400, nullable=False)  # Daily
+    dns_check_interval = db.Column(db.Integer, default=3600, nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=now_utc, nullable=False)
     updated_at = db.Column(db.DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False, index=True)
 
@@ -34,9 +36,13 @@ class Site(db.Model):
     last_uptime_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
     last_ssl_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
     last_seo_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_security_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_dns_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
     next_uptime_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
     next_ssl_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
     next_seo_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    next_security_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    next_dns_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
     next_check_at = db.Column(db.DateTime(timezone=True), nullable=True)
     
     # SaaS State Management
@@ -46,11 +52,15 @@ class Site(db.Model):
     uptime_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     ssl_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     seo_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    security_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    dns_started_at = db.Column(db.DateTime(timezone=True), nullable=True)
     
     # Granular Statuses (pending, running, done, failed)
     uptime_status = db.Column(db.String(32), nullable=False, default="pending")
     ssl_status = db.Column(db.String(32), nullable=False, default="pending")
     seo_status = db.Column(db.String(32), nullable=False, default="pending")
+    security_status = db.Column(db.String(32), nullable=False, default="pending")
+    dns_status = db.Column(db.String(32), nullable=True, default="pending")
 
     # Uptime Metrics
     current_status = db.Column(db.String(32), nullable=False, default="PENDING")
@@ -75,6 +85,20 @@ class Site(db.Model):
     last_seo_fetch_valid = db.Column(db.Boolean, default=True)
     last_downtime_ended_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
+    # Security Metrics
+    security_score = db.Column(db.Integer, nullable=False, default=0)
+    security_grade = db.Column(db.String(2), nullable=True)
+    security_last_error = db.Column(db.Text, nullable=True)
+
+    # DNS Metrics
+    dns_resolved = db.Column(db.Boolean, nullable=True)
+    dns_resolution_time_ms = db.Column(db.Float, nullable=True)
+    dns_last_ips = db.Column(db.JSON, nullable=True)
+    dns_last_ns = db.Column(db.JSON, nullable=True)
+    dns_hijack_suspected = db.Column(db.Boolean, default=False, nullable=True)
+    dns_ns_changed = db.Column(db.Boolean, default=False, nullable=True)
+    dns_last_error = db.Column(db.String(500), nullable=True)
+
     # ── Denormalized CWV (from latest successful Playwright audit) ─
     lh_performance_score = db.Column(db.Integer, nullable=True)
     lh_lcp_ms            = db.Column(db.Float,   nullable=True)
@@ -84,6 +108,7 @@ class Site(db.Model):
     uptime_logs = db.relationship("UptimeLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     ssl_logs = db.relationship("SSLLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     seo_logs = db.relationship("SEOLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
+    dns_logs = db.relationship("DNSLog", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     incidents = db.relationship("Incident", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     alert_history = db.relationship("AlertHistory", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     daily_summaries = db.relationship("DailyUptimeSummary", backref="site", lazy="dynamic", cascade="all, delete-orphan")
@@ -110,6 +135,16 @@ class Site(db.Model):
             "seo_state": self.seo_state,
             "seo_score": self.seo_score,
             "last_seo_fetch_valid": self.last_seo_fetch_valid,
+            "security_score": self.security_score,
+            "security_grade": self.security_grade,
+            "dns_resolved": self.dns_resolved,
+            "dns_resolution_time_ms": self.dns_resolution_time_ms,
+            "dns_last_ips": self.dns_last_ips or [],
+            "dns_last_ns": self.dns_last_ns or [],
+            "dns_hijack_suspected": self.dns_hijack_suspected,
+            "dns_ns_changed": self.dns_ns_changed,
+            "dns_status": self.dns_status,
+            "dns_last_error": self.dns_last_error,
             "lighthouse": {
                 "performance_score": self.lh_performance_score,
                 "lcp_ms": self.lh_lcp_ms,
@@ -119,12 +154,14 @@ class Site(db.Model):
             "last_uptime_check_at": self.last_uptime_check_at.isoformat() if self.last_uptime_check_at else None,
             "last_ssl_check_at": self.last_ssl_check_at.isoformat() if self.last_ssl_check_at else None,
             "last_seo_check_at": self.last_seo_check_at.isoformat() if self.last_seo_check_at else None,
+            "last_security_check_at": self.last_security_check_at.isoformat() if self.last_security_check_at else None,
+            "last_dns_check_at": self.last_dns_check_at.isoformat() if self.last_dns_check_at else None,
             "next_check_at": self.next_check_at.isoformat() if self.next_check_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
     def refresh_app_status(self):
-        statuses = [self.uptime_status, self.ssl_status, self.seo_status]
+        statuses = [self.uptime_status, self.ssl_status, self.seo_status, self.security_status, self.dns_status]
 
         self.is_processing = any(s == "running" for s in statuses)
 
@@ -140,6 +177,9 @@ class Site(db.Model):
             self.app_status = "ready"
         elif any(s == "failed" for s in statuses):
             self.app_status = "partial"
+        elif any(s == "pending" for s in statuses):
+            # Some checks completed, others still pending - site is initializing
+            self.app_status = "initializing"
         else:
             self.app_status = "partial"
 
@@ -151,6 +191,8 @@ class Site(db.Model):
             ("uptime", cls.uptime_status, cls.uptime_started_at, now - timedelta(minutes=10)),
             ("ssl", cls.ssl_status, cls.ssl_started_at, now - timedelta(minutes=30)),
             ("seo", cls.seo_status, cls.seo_started_at, now - timedelta(minutes=90)),
+            ("security", cls.security_status, cls.security_started_at, now - timedelta(minutes=30)),
+            ("dns", cls.dns_status, cls.dns_started_at, now - timedelta(minutes=10)),
         )
 
         for check_type, status_field, started_field, cutoff in checks:

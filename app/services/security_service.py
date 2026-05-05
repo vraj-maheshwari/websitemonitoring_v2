@@ -18,6 +18,7 @@ headers come from the main page fetch, HTML is already in memory).
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -615,3 +616,59 @@ def run_security_audit(html: str, response_headers: dict, url: str = "") -> dict
         "security_issues": all_issues,
         "malware_flags": backward_malware,
     }
+
+
+def run_security_check(site_id: int) -> dict:
+    """
+    Run a security check for a site. Fetches the page and runs security audit.
+    Updates the site model with results.
+    """
+    from app import create_app
+    from app.models.site import Site
+    from app.services.monitor_service import fetch_page
+    from app.utils.time import now_utc
+
+    app = create_app()
+    with app.app_context():
+        site = db.session.get(Site, site_id)
+        if not site:
+            return {"error": "Site not found"}
+
+        try:
+            # Fetch the page
+            fetch_result = fetch_page(site.url)
+            if not fetch_result["success"]:
+                site.security_status = "failed"
+                site.security_last_error = fetch_result.get("error", "Fetch failed")
+                site.refresh_app_status()
+                return {"error": fetch_result.get("error", "Fetch failed")}
+
+            html = fetch_result["html"]
+            headers = fetch_result["headers"]
+
+            # Run security audit
+            audit_result = run_security_audit(html, headers, site.url)
+
+            # Update site
+            site.security_score = audit_result["score"]
+            site.security_grade = audit_result["grade"]
+            site.security_status = "done"
+            site.last_security_check_at = now_utc()
+            site.next_security_check_at = now_utc() + timedelta(seconds=site.security_check_interval)
+            site.security_last_error = None
+            site.refresh_app_status()
+
+            # Log the result
+            logger.info(
+                "[SECURITY CHECK] site_id=%s score=%d grade=%s",
+                site_id, audit_result["score"], audit_result["grade"]
+            )
+
+            return audit_result
+
+        except Exception as e:
+            logger.error("[SECURITY CHECK] site_id=%s error: %s", site_id, str(e))
+            site.security_status = "failed"
+            site.security_last_error = str(e)
+            site.refresh_app_status()
+            return {"error": str(e)}

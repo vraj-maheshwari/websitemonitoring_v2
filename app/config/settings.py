@@ -14,6 +14,9 @@ class Config:
     # Flask
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
     DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = "Lax"
+    PERMANENT_SESSION_LIFETIME = 86400
 
     # Database
     SQLALCHEMY_DATABASE_URI = os.getenv(
@@ -55,6 +58,14 @@ class Config:
         "run-due-seo-checks": {
             "task": "tasks.run_due_seo_checks",
             "schedule": crontab(minute=5),
+        },
+        "run-due-security-checks": {
+            "task": "tasks.run_due_security_checks",
+            "schedule": crontab(minute=10),
+        },
+        "run-due-dns-checks": {
+            "task": "tasks.run_due_dns_checks",
+            "schedule": 60.0,
         },
         "run-zombie-rescue": {
             "task": "tasks.run_zombie_rescue",

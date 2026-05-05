@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block title %}Analytics - {{ site.display_name() }}{% endblock %}
+
+{% block content %}
+<div class="container">
+  <div class="page-header">
+    <h1>📊 Analytics Dashboard</h1>
+    <p>{{ site.display_name() }} - {{ site.url }}</p>
+  </div>
+
+  <div class="analytics-controls">
+    <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="btn btn-secondary">← Back to Site</a>
+    <div class="time-range-selector">
+      <a href="{{ url_for('web.site_analytics', site_id=site.id, days=7) }}" class="btn {% if days == 7 %}btn-primary{% else %}btn-outline{% endif %}">7 Days</a>
+      <a href="{{ url_for('web.site_analytics', site_id=site.id, days=30) }}" class="btn {% if days == 30 %}btn-primary{% else %}btn-outline{% endif %}">30 Days</a>
+      <a href="{{ url_for('web.site_analytics', site_id=site.id, days=90) }}" class="btn {% if days == 90 %}btn-primary{% else %}btn-outline{% endif %}">90 Days</a>
+    </div>
+  </div>
+
+  <div class="analytics-grid">
+    <!-- Uptime Analytics -->
+    <div class="analytics-card">
+      <h3>⏱️ Uptime Performance</h3>
+      <div class="metric-large">
+        <span class="metric-value">{{ "%.1f"|format(analytics.uptime_percentage) }}%</span>
+        <span class="metric-label">Uptime</span>
+      </div>
+      <div class="metric-breakdown">
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.total_checks }}</span>
+          <span class="metric-label">Total Checks</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.uptime_checks }}</span>
+          <span class="metric-label">Up</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.downtime_checks }}</span>
+          <span class="metric-label">Down</span>
+        </div>
+      </div>
+      {% if analytics.incidents %}
+      <div class="incidents-summary">
+        <h4>Incidents ({{ analytics.incidents|length }})</h4>
+        <ul>
+          {% for incident in analytics.incidents %}
+          <li>
+            <strong>{{ incident.duration_minutes }}min</strong>
+            {{ incident.opened_at.strftime('%Y-%m-%d %H:%M') }}
+            {% if incident.root_cause %}- {{ incident.root_cause }}{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </div>
+
+    <!-- Response Time Analytics -->
+    <div class="analytics-card">
+      <h3>⚡ Response Time</h3>
+      <div class="metric-large">
+        <span class="metric-value">{{ "%.0f"|format(analytics.avg_response_time_ms) }}ms</span>
+        <span class="metric-label">Average</span>
+      </div>
+      <div class="metric-breakdown">
+        <div class="metric-item">
+          <span class="metric-value">{{ "%.0f"|format(analytics.min_response_time_ms) }}ms</span>
+          <span class="metric-label">Min</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ "%.0f"|format(analytics.max_response_time_ms) }}ms</span>
+          <span class="metric-label">Max</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ "%.0f"|format(analytics.median_response_time_ms) }}ms</span>
+          <span class="metric-label">Median</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- SSL Analytics -->
+    <div class="analytics-card">
+      <h3>🔒 SSL Certificate</h3>
+      {% if analytics.ssl_expiry_days is not none %}
+      <div class="metric-large">
+        <span class="metric-value">{{ analytics.ssl_expiry_days }}</span>
+        <span class="metric-label">Days Until Expiry</span>
+      </div>
+      {% else %}
+      <div class="metric-large">
+        <span class="metric-value">N/A</span>
+        <span class="metric-label">No SSL Data</span>
+      </div>
+      {% endif %}
+      <div class="ssl-details">
+        <p><strong>Issuer:</strong> {{ analytics.ssl_issuer or 'Unknown' }}</p>
+        <p><strong>Valid Until:</strong> {{ analytics.ssl_expiry_date or 'Unknown' }}</p>
+      </div>
+    </div>
+
+    <!-- SEO Analytics -->
+    <div class="analytics-card">
+      <h3>🔍 SEO Performance</h3>
+      <div class="metric-large">
+        <span class="metric-value">{{ analytics.seo_score_avg or 0 }}</span>
+        <span class="metric-label">Average Score</span>
+      </div>
+      <div class="metric-breakdown">
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.seo_checks_count }}</span>
+          <span class="metric-label">Audits</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.seo_score_min or 0 }}</span>
+          <span class="metric-label">Min Score</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-value">{{ analytics.seo_score_max or 0 }}</span>
+          <span class="metric-label">Max Score</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lighthouse CWV -->
+    {% if analytics.lighthouse_data %}
+    <div class="analytics-card full-width">
+      <h3>🚀 Core Web Vitals</h3>
+      <div class="cwv-grid">
+        <div class="cwv-metric">
+          <div class="cwv-value">{{ "%.1f"|format(analytics.lighthouse_data.lcp_avg) }}s</div>
+          <div class="cwv-label">Largest Contentful Paint</div>
+          <div class="cwv-rating {{ analytics.lighthouse_data.lcp_rating }}">{{ analytics.lighthouse_data.lcp_rating|upper }}</div>
+        </div>
+        <div class="cwv-metric">
+          <div class="cwv-value">{{ "%.3f"|format(analytics.lighthouse_data.cls_avg) }}</div>
+          <div class="cwv-label">Cumulative Layout Shift</div>
+          <div class="cwv-rating {{ analytics.lighthouse_data.cls_rating }}">{{ analytics.lighthouse_data.cls_rating|upper }}</div>
+        </div>
+        <div class="cwv-metric">
+          <div class="cwv-value">{{ "%.0f"|format(analytics.lighthouse_data.performance_avg) }}</div>
+          <div class="cwv-label">Performance Score</div>
+          <div class="cwv-rating {{ analytics.lighthouse_data.performance_rating }}">{{ analytics.lighthouse_data.performance_rating|upper }}</div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Daily Trends -->
+    <div class="analytics-card full-width">
+      <h3>📈 Daily Trends (Last {{ days }} Days)</h3>
+      <div class="trends-chart">
+        <div class="chart-placeholder">
+          <p>Chart visualization would go here</p>
+          <p>Showing uptime %, response times, and SEO scores over time</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -7,15 +7,17 @@ from flask_wtf.csrf import CSRFProtect
 from sqlalchemy.exc import OperationalError
 from app.extensions import db
 from app.config.settings import Config
-from app.models.site import Site
-from app.services.monitoring_service import prepare_site
 
 csrf = CSRFProtect()
 
-def create_app():
+def create_app(test_config: dict | None = None):
     flask_app = Flask(__name__)   # ✅ NEVER use name 'app' here
 
     flask_app.config.from_object(Config)
+    if test_config:
+        flask_app.config.update(test_config)
+    if not flask_app.config.get("DEBUG") and not flask_app.config.get("TESTING"):
+        flask_app.config["SESSION_COOKIE_SECURE"] = True
     _fallback_sqlite_if_unusable(flask_app)
 
     db.init_app(flask_app)
@@ -28,6 +30,7 @@ def create_app():
         import app.models.uptime_log
         import app.models.ssl_log
         import app.models.seo_log
+        import app.models.dns_log
         import app.models.incident
         import app.models.alert_history
         import app.models.daily_uptime_summary
@@ -43,6 +46,7 @@ def create_app():
                 "Database initialization failed. If you are using SQLite, check "
                 "that the configured database file is not locked or corrupt."
             ) from exc
+        _ensure_dev_user(flask_app)
 
     # ✅ import routes AFTER app creation
     from app.api.routes import api_bp, web_bp
@@ -51,6 +55,20 @@ def create_app():
     flask_app.register_blueprint(api_bp, url_prefix="/api")
 
     return flask_app
+
+
+def _ensure_dev_user(flask_app: Flask) -> None:
+    if not flask_app.config.get("DEBUG"):
+        return
+
+    from app.models.user import User
+
+    if User.query.first() is not None:
+        return
+    user = User(email="dev@localhost.test", is_active=True)
+    user.set_password("devpassword123")
+    db.session.add(user)
+    db.session.commit()
 
 
 def _fallback_sqlite_if_unusable(flask_app: Flask) -> None:

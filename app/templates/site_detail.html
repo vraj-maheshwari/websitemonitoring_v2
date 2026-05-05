@@ -12,6 +12,7 @@
 {% macro pill_uptime(s) %}{% if s == 'UP' %}pill-green{% elif s == 'DOWN' %}pill-red{% elif s == 'DEGRADED' %}pill-yellow{% else %}pill-gray{% endif %}{% endmacro %}
 {% macro pill_seo(s) %}{% if s >= 80 %}pill-green{% elif s >= 60 %}pill-yellow{% elif s > 0 %}pill-red{% else %}pill-gray{% endif %}{% endmacro %}
 {% macro pill_ssl(state) %}{% if state == 'VALID' %}pill-green{% elif state == 'EXPIRING' %}pill-yellow{% elif state in ['EXPIRED','ERROR'] %}pill-red{% else %}pill-gray{% endif %}{% endmacro %}
+{% macro pill_dns(site) %}{% if site.dns_status == 'done' and site.dns_resolved and not site.dns_hijack_suspected and not site.dns_ns_changed %}pill-green{% elif site.dns_status == 'failed' or site.dns_hijack_suspected %}pill-red{% elif site.dns_status == 'running' or site.dns_ns_changed %}pill-yellow{% else %}pill-gray{% endif %}{% endmacro %}
 {% macro score_bar_cls(score) %}{% if score >= 80 %}green{% elif score >= 60 %}yellow{% else %}red{% endif %}{% endmacro %}
 {% macro tile_cls(ratio) %}{% if ratio >= 0.8 %}val-green{% elif ratio >= 0.6 %}val-yellow{% else %}val-red{% endif %}{% endmacro %}
 
@@ -34,13 +35,81 @@
     <div class="detail-header-url">{{ site.url }}</div>
   </div>
   <div class="detail-header-right">
-    <a href="{{ url_for('web.download_report', site_id=site.id) }}" class="btn btn-secondary btn-sm">⬇ Export JSON</a>
+    <button id="edit-site-btn" class="btn btn-secondary btn-sm">✏ Edit Site</button>
+    <div style="position:relative;">
+      <button id="download-btn" class="btn btn-secondary btn-sm">⬇ Download Report ▼</button>
+      <div id="download-menu" style="display:none;position:absolute;top:100%;right:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);z-index:10;min-width:120px;">
+        <a href="{{ url_for('web.download_report', site_id=site.id) }}" class="download-option">JSON</a>
+        <a href="{{ url_for('web.download_report', site_id=site.id, format='csv') }}" class="download-option">CSV</a>
+        <a href="{{ url_for('web.download_report', site_id=site.id, format='pdf') }}" class="download-option">PDF</a>
+      </div>
+    </div>
     <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='all') }}" style="margin:0;">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button type="submit" class="btn btn-primary btn-sm"
               {% if site.app_status == 'checking' %}disabled{% endif %}>↻ Run Full Audit</button>
     </form>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;">
+      <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='uptime') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-outline btn-xs"
+                {% if site.uptime_status == 'running' %}disabled{% endif %}>Uptime</button>
+      </form>
+      <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='ssl') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-outline btn-xs"
+                {% if site.ssl_status == 'running' %}disabled{% endif %}>SSL</button>
+      </form>
+      <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='seo') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-outline btn-xs"
+                {% if site.seo_status == 'running' %}disabled{% endif %}>SEO</button>
+      </form>
+      <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='security') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-outline btn-xs"
+                {% if site.security_status == 'running' %}disabled{% endif %}>Security</button>
+      </form>
+      <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='dns') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-outline btn-xs"
+                {% if site.dns_status == 'running' %}disabled{% endif %}>DNS</button>
+      </form>
+    </div>
+    <a href="{{ url_for('web.site_analytics', site_id=site.id) }}" class="btn btn-info btn-sm">📊 Analytics</a>
   </div>
+</div>
+
+{# ─── EDIT SITE FORM ─── #}
+<div id="edit-site-form" class="card" style="display:none;margin-bottom:20px;">
+  <div class="section-head">
+    <h2>Edit Site Configuration</h2>
+  </div>
+  <form id="edit-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+      <div>
+        <label for="edit-name" class="form-label">Display Name</label>
+        <input type="text" id="edit-name" name="name" value="{{ site.name or '' }}" class="form-input" placeholder="Leave blank for auto-generated">
+      </div>
+      <div>
+        <label for="edit-uptime-interval" class="form-label">Uptime Check Interval (minutes)</label>
+        <input type="number" id="edit-uptime-interval" name="uptime_check_interval" value="{{ (site.uptime_check_interval // 60) }}" min="1" class="form-input">
+      </div>
+      <div>
+        <label for="edit-ssl-interval" class="form-label">SSL Check Interval (hours)</label>
+        <input type="number" id="edit-ssl-interval" name="ssl_check_interval" value="{{ (site.ssl_check_interval // 3600) }}" min="1" class="form-input">
+      </div>
+      <div>
+        <label for="edit-seo-interval" class="form-label">SEO Check Interval (hours)</label>
+        <input type="number" id="edit-seo-interval" name="seo_check_interval" value="{{ (site.seo_check_interval // 3600) }}" min="1" class="form-input">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button type="submit" class="btn btn-primary">Save Changes</button>
+      <button type="button" id="cancel-edit" class="btn btn-secondary">Cancel</button>
+    </div>
+  </form>
 </div>
 
 {# ─── 2. METRIC CARDS ─── #}
@@ -104,6 +173,27 @@
       </span>
     </div>
     <div class="desc">{{ site.seo_state }} · {{ site.seo_status }}</div>
+  </div>
+
+  <div class="detail-metric-card">
+    <div class="label">DNS Health</div>
+    <div class="value {% if site.dns_status == 'failed' or site.dns_hijack_suspected %}val-red{% elif site.dns_ns_changed or site.dns_status == 'running' %}val-yellow{% elif site.dns_status == 'done' and site.dns_resolved %}val-green{% else %}val-muted{% endif %}">
+      {% if site.dns_status == 'failed' %}Fail
+      {% elif site.dns_hijack_suspected %}IP
+      {% elif site.dns_ns_changed %}NS
+      {% elif site.dns_status == 'done' and site.dns_resolved %}OK
+      {% elif site.dns_status == 'running' %}Run
+      {% else %}&mdash;{% endif %}
+    </div>
+    <div style="margin-bottom:6px;">
+      <span class="pill {{ pill_dns(site) }}">{{ site.dns_status or 'pending' }}</span>
+      {% if site.dns_resolution_time_ms is not none %}
+        <span class="pill pill-gray">{{ '%.0f'|format(site.dns_resolution_time_ms) }}ms</span>
+      {% endif %}
+    </div>
+    <div class="desc">
+      {% if site.last_dns_check_at %}Last checked {{ site.last_dns_check_at.strftime('%b %d, %H:%M') }}{% else %}Not checked yet{% endif %}
+    </div>
   </div>
 
 </div>
@@ -881,6 +971,49 @@
     {% endif %}
   </div>
 
+  {# DNS Details #}
+  <div class="card">
+    <div class="section-head">
+      <div class="label">DNS</div>
+      <h2>Resolution Details</h2>
+    </div>
+    <div class="signal-list">
+      <div class="signal-row"><span>State</span><strong><span class="pill {{ pill_dns(site) }}">{{ site.dns_status or 'pending' }}</span></strong></div>
+      <div class="signal-row"><span>Resolved</span><strong class="{% if site.dns_resolved %}val-green{% elif site.dns_status == 'failed' %}val-red{% else %}val-muted{% endif %}">{% if site.dns_resolved %}Yes{% elif site.dns_status == 'failed' %}No{% else %}&mdash;{% endif %}</strong></div>
+      <div class="signal-row"><span>Lookup Time</span><strong>{% if site.dns_resolution_time_ms is not none %}{{ '%.0f'|format(site.dns_resolution_time_ms) }}ms{% else %}&mdash;{% endif %}</strong></div>
+      <div class="signal-row"><span>IP Addresses</span><strong class="truncate" style="max-width:180px;">{{ (site.dns_last_ips or []) | join(', ') or '&mdash;' }}</strong></div>
+      <div class="signal-row"><span>Nameservers</span><strong class="truncate" style="max-width:180px;">{{ (site.dns_last_ns or []) | join(', ') or '&mdash;' }}</strong></div>
+      <div class="signal-row"><span>IP Change</span><strong class="{% if site.dns_hijack_suspected %}val-red{% else %}val-green{% endif %}">{% if site.dns_hijack_suspected %}Detected{% else %}None{% endif %}</strong></div>
+      <div class="signal-row"><span>NS Change</span><strong class="{% if site.dns_ns_changed %}val-yellow{% else %}val-green{% endif %}">{% if site.dns_ns_changed %}Detected{% else %}None{% endif %}</strong></div>
+      <div class="signal-row"><span>Last Checked</span><strong>{% if site.last_dns_check_at %}{{ site.last_dns_check_at.strftime('%b %d, %H:%M') }}{% else %}&mdash;{% endif %}</strong></div>
+    </div>
+    {% if site.dns_last_error %}
+    <div style="margin-top:10px;padding:10px 12px;background:var(--red-bg);border:1px solid var(--red-border);border-radius:var(--radius-sm);font-size:.78rem;color:var(--red);">
+      {{ site.dns_last_error }}
+    </div>
+    {% endif %}
+    {% if dns_logs %}
+    <div style="margin-top:12px;display:flex;flex-direction:column;gap:6px;">
+      {% for log in dns_logs[:5] %}
+      <div class="uptime-row">
+        <div class="dot {% if log.resolved %}dot-green{% else %}dot-red{% endif %}"></div>
+        <span class="time mono">{{ log.checked_at.strftime('%H:%M:%S') }}</span>
+        <span class="lat">{% if log.resolution_time_ms is not none %}{{ '%.0f'|format(log.resolution_time_ms) }}ms{% else %}&mdash;{% endif %}</span>
+        <span class="pill {% if log.hijack_suspected %}pill-red{% elif log.ns_changed %}pill-yellow{% elif log.resolved %}pill-green{% else %}pill-red{% endif %}" style="font-size:.68rem;padding:2px 7px;">
+          {% if log.hijack_suspected %}IP{% elif log.ns_changed %}NS{% elif log.resolved %}OK{% else %}FAIL{% endif %}
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    <div style="margin-top:12px;">
+      <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='dns') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button type="submit" class="btn btn-secondary btn-sm" style="width:100%;justify-content:center;">Re-check DNS</button>
+      </form>
+    </div>
+  </div>
+
   {# SSL Details #}
   <div class="card">
     <div class="section-head">
@@ -1040,8 +1173,9 @@
     </span>
   </div>
 
+  <div class="incident-history-scroll">
   {% for incident in recent_incidents %}
-  <div style="margin-bottom:20px;padding-bottom:20px;{% if not loop.last %}border-bottom:1px solid var(--border);{% endif %}">
+  <div class="incident-history-item">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
       <span class="pill {% if incident.status == 'OPEN' %}pill-red{% else %}pill-green{% endif %}">
         {{ incident.status }}
@@ -1080,6 +1214,7 @@
     {% endif %}
   </div>
   {% endfor %}
+  </div>
 </div>
 {% endif %}
 
@@ -1109,6 +1244,67 @@ document.addEventListener('DOMContentLoaded', function () {
         }
       } catch(e) {}
     }, 3000);
+  }
+
+  // Edit site functionality
+  const editBtn = document.getElementById('edit-site-btn');
+  const editForm = document.getElementById('edit-site-form');
+  const cancelBtn = document.getElementById('cancel-edit');
+  const form = document.getElementById('edit-form');
+    const siteId = {{ site.id }};
+
+    editBtn.addEventListener('click', () => {
+      editForm.style.display = editForm.style.display === 'none' ? 'block' : 'none';
+    });
+
+    cancelBtn.addEventListener('click', () => {
+      editForm.style.display = 'none';
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const formData = new FormData(form);
+      const data = {};
+      for (let [key, value] of formData.entries()) {
+        if (key !== 'csrf_token') {
+          data[key] = value;
+        }
+      }
+      try {
+        const response = await fetch(`/api/sites/${siteId}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': formData.get('csrf_token')
+          },
+          body: JSON.stringify(data)
+        });
+        if (response.ok) {
+          alert('Site updated successfully!');
+          editForm.style.display = 'none';
+          window.location.reload();
+        } else {
+          const error = await response.json();
+          alert('Error: ' + (error.error || 'Unknown error'));
+        }
+      } catch (err) {
+        alert('Network error: ' + err.message);
+      }
+    });
+
+  const downloadBtn = document.getElementById('download-btn');
+  const downloadMenu = document.getElementById('download-menu');
+
+  if (downloadBtn && downloadMenu) {
+    downloadBtn.addEventListener('click', () => {
+      downloadMenu.style.display = downloadMenu.style.display === 'none' ? 'block' : 'none';
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!downloadBtn.contains(e.target) && !downloadMenu.contains(e.target)) {
+        downloadMenu.style.display = 'none';
+      }
+    });
   }
 });
 </script>
