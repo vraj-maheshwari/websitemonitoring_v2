@@ -30,7 +30,7 @@ class Config:
     }
 
     # Redis / Celery
-    REDIS_URL = os.getenv("REDIS_URL", "redis://default:tqJqMQBXOXaodaHqpErIvJYPZIkLNsQU@redis.railway.internal:6379")
+    REDIS_URL = os.getenv("REDIS_URL")
     CELERY_BROKER_URL = REDIS_URL
     CELERY_RESULT_BACKEND = REDIS_URL
     CELERY_TASK_SERIALIZER = "json"
