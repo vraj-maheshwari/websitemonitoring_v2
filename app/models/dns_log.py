@@ -25,7 +25,7 @@ class DNSLog(db.Model):
         return {
             "id": self.id,
             "site_id": self.site_id,
-            "checked_at": self.checked_at.isoformat() if self.checked_at else None,
+            "checked_at": self.checked_at.isoformat() + "Z" if self.checked_at else None,
             "resolved": self.resolved,
             "resolution_time_ms": self.resolution_time_ms,
             "ip_addresses": self.ip_addresses or [],

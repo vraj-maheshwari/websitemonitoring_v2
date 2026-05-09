@@ -34,5 +34,5 @@ class AlertHistory(db.Model):
             "subject": self.subject,
             "delivery_status": self.delivery_status,
             "error_message": self.error_message,
-            "sent_at": self.sent_at.isoformat(),
+            "sent_at": self.sent_at.isoformat() + "Z",
         }

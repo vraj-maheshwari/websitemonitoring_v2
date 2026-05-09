@@ -42,7 +42,7 @@ def make_timeline_event(
 ) -> dict:
     return {
         "status":        status,
-        "time":          checked_at.isoformat(),
+        "time":          checked_at.isoformat() + "Z",
         "response_time": round(response_time, 3) if response_time is not None else None,
         "status_code":   status_code,
         "error":         error,

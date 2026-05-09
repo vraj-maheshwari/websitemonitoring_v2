@@ -355,6 +355,8 @@ def run_seo_check(site_or_id, db_session=None) -> dict | None:
         if lh.performance_score is not None:
             site.lh_performance_score = lh.performance_score
             site.lh_lcp_ms = lh.lcp_ms
+            site.lh_tbt_ms = lh.tbt_ms
+            site.lh_fcp_ms = lh.fcp_ms
             site.lh_cls = lh.cls
 
         db_session.commit()

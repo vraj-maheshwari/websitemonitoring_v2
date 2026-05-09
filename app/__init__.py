@@ -2,8 +2,8 @@ import os
 import sqlite3
 from urllib.parse import unquote
 
-from flask import Flask
-from flask_wtf.csrf import CSRFProtect
+from flask import Flask, jsonify
+from flask_wtf.csrf import CSRFProtect, generate_csrf
 from sqlalchemy.exc import OperationalError
 from app.extensions import db
 from app.config.settings import Config
@@ -22,6 +22,12 @@ def create_app(test_config: dict | None = None):
 
     db.init_app(flask_app)
     csrf.init_app(flask_app)
+    flask_app.jinja_env.globals['csrf_token'] = generate_csrf
+
+    # Add time filters
+    from app.utils.time import to_local
+    flask_app.jinja_env.filters['localtime'] = to_local
+    flask_app.jinja_env.filters['strftime'] = lambda dt, fmt: dt.strftime(fmt) if dt is not None else ''
 
     # ✅ load models
     with flask_app.app_context():
@@ -53,6 +59,17 @@ def create_app(test_config: dict | None = None):
 
     flask_app.register_blueprint(web_bp)
     flask_app.register_blueprint(api_bp, url_prefix="/api")
+    csrf.exempt(api_bp)
+
+    @flask_app.errorhandler(500)
+    def handle_500(e):
+        import traceback
+        error_details = traceback.format_exc()
+        return jsonify({
+            "error": "Internal Server Error",
+            "message": str(e),
+            "traceback": error_details
+        }), 500
 
     return flask_app
 
@@ -63,7 +80,7 @@ def _ensure_dev_user(flask_app: Flask) -> None:
 
     from app.models.user import User
 
-    if User.query.first() is not None:
+    if User.query.filter_by(email="dev@localhost.test").first() is not None:
         return
     user = User(email="dev@localhost.test", is_active=True)
     user.set_password("devpassword123")

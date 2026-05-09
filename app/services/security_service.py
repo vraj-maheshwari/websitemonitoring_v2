@@ -623,9 +623,9 @@ def run_security_check(site_id: int) -> dict:
     Run a security check for a site. Fetches the page and runs security audit.
     Updates the site model with results.
     """
-    from app import create_app
+    from app import create_app, db
     from app.models.site import Site
-    from app.services.monitor_service import fetch_page
+    from app.utils.http import fetch_url
     from app.utils.time import now_utc
 
     app = create_app()
@@ -636,15 +636,15 @@ def run_security_check(site_id: int) -> dict:
 
         try:
             # Fetch the page
-            fetch_result = fetch_page(site.url)
-            if not fetch_result["success"]:
+            fetch_result = fetch_url(site.url, timeout=15.0)
+            if not fetch_result.get("is_up"):
                 site.security_status = "failed"
                 site.security_last_error = fetch_result.get("error", "Fetch failed")
                 site.refresh_app_status()
                 return {"error": fetch_result.get("error", "Fetch failed")}
 
-            html = fetch_result["html"]
-            headers = fetch_result["headers"]
+            html = fetch_result.get("html_content") or ""
+            headers = fetch_result.get("headers") or {}
 
             # Run security audit
             audit_result = run_security_audit(html, headers, site.url)

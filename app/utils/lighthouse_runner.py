@@ -89,19 +89,23 @@ _METRICS_JS: str = """
     if (e.name === 'first-contentful-paint') result.fcp = e.startTime;
   });
 
-  // Buffered layout shift (CLS) — exclude hadRecentInput per spec
-  performance.getEntriesByType('layout-shift').forEach(e => {
-    if (!e.hadRecentInput) result.cls += e.value;
-  });
-
-  // Buffered long tasks (TBT = sum of durations over 50ms)
-  performance.getEntriesByType('longtask').forEach(e => {
-    result.longTaskMs += Math.max(0, e.duration - 50);
-    result.longTaskCount += 1;
-  });
-
-  // LCP via observer with buffered:true
+  // Use Observers for buffered metrics (more reliable than getEntriesByType)
   try {
+    const clsObs = new PerformanceObserver(list => {
+      for (const e of list.getEntries()) {
+        if (!e.hadRecentInput) result.cls += e.value;
+      }
+    });
+    clsObs.observe({ type: 'layout-shift', buffered: true });
+
+    const tbtObs = new PerformanceObserver(list => {
+      for (const e of list.getEntries()) {
+        result.longTaskMs += Math.max(0, e.duration - 50);
+        result.longTaskCount += 1;
+      }
+    });
+    tbtObs.observe({ type: 'longtask', buffered: true });
+
     const lcpObs = new PerformanceObserver(list => {
       const entries = list.getEntries();
       if (entries.length > 0) {
@@ -109,8 +113,20 @@ _METRICS_JS: str = """
       }
     });
     lcpObs.observe({ type: 'largest-contentful-paint', buffered: true });
-    setTimeout(() => { try { lcpObs.disconnect(); } catch(e) {} }, 2800);
-  } catch(e) { /* browser does not support LCP observer */ }
+
+    // Disconnect after wait
+    setTimeout(() => {
+      try { clsObs.disconnect(); tbtObs.disconnect(); lcpObs.disconnect(); } catch(e) {}
+    }, 2800);
+  } catch(e) {
+    // Fallback for browsers that don't support buffered observers
+    performance.getEntriesByType('layout-shift').forEach(e => {
+      if (!e.hadRecentInput) result.cls += e.value;
+    });
+    performance.getEntriesByType('longtask').forEach(e => {
+      result.longTaskMs += Math.max(0, e.duration - 50);
+    });
+  }
 
   // Resolve after full wait
   setTimeout(() => resolve(result), 3000);
@@ -293,6 +309,8 @@ def run_lighthouse_audit(
     """
     result = LighthouseResult(url=url)
 
+    browser = None
+    context = None
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
@@ -319,8 +337,8 @@ def run_lighthouse_audit(
             try:
                 raw: dict = page.evaluate(_METRICS_JS)
             finally:
-                context.close()
-                browser.close()
+                if context: context.close()
+                if browser: browser.close()
 
         # Map JS output to result fields
         result.ttfb_ms      = _safe_round(raw.get("ttfb"))

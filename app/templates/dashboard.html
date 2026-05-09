@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Overview — WebMonitor{% endblock %}
+{% block title %}Dashboard — WebMonitor{% endblock %}
 
 {% block content %}
 {%- set total = metrics.monitored_sites -%}
@@ -10,18 +10,16 @@
   {%- set health_class = 'healthy' -%}
   {%- set health_label = 'All Systems Healthy' -%}
   {%- set dot_cls  = 'dot-green' -%}
-  {%- set pill_cls = 'pill-green' -%}
 {%- elif pct >= 60 -%}
   {%- set health_class = 'warning' -%}
   {%- set health_label = 'Degraded Performance' -%}
   {%- set dot_cls  = 'dot-yellow' -%}
-  {%- set pill_cls = 'pill-yellow' -%}
 {%- else -%}
   {%- set health_class = 'critical' -%}
   {%- set health_label = 'Critical — Action Required' -%}
   {%- set dot_cls  = 'dot-red' -%}
-  {%- set pill_cls = 'pill-red' -%}
 {%- endif -%}
+
 {%- set up_pct     = ((up / total * 100) | round(1)) if total else 0 -%}
 {%- set ssl_critical = site_cards | selectattr('ssl_days_remaining','ne',none) | selectattr('ssl_days_remaining','lt',14) | list | length -%}
 {%- set seo_scores   = site_cards | selectattr('seo_score','gt',0) | map(attribute='seo_score') | list -%}
@@ -35,388 +33,277 @@
 {%- set dns_issue_count = (dns_failed | length) + (dns_hijack | length) + (dns_nschange | length) -%}
 {%- set dns_checked = site_cards | selectattr('last_dns_check_at','ne',none) | list | length -%}
 
-{# ── 1. GLOBAL STATUS BAR ── #}
-<div class="status-bar">
-  <div class="status-bar-left">
-    <div class="status-score {{ health_class }}">{{ pct }}%</div>
-    <div class="status-bar-meta">
-      <div class="status-label">
-        <span class="dot {{ dot_cls }}" style="margin-right:6px;"></span>{{ health_label }}
-      </div>
-      <div class="status-sub">
-        {{ up }}/{{ total }} sites operational
-        {% if down > 0 %} · <span class="val-red">{{ down }} down</span>{% endif %}
-      </div>
-      <div class="status-sub" style="margin-top:2px;">
-        Avg latency:
-        {% if metrics.avg_response is not none %}<strong>{{ '%.2f'|format(metrics.avg_response) }}s</strong>
-        {% else %}<strong class="val-muted">—</strong>{% endif %}
-      </div>
+<!-- HEALTH OVERVIEW -->
+<section class="health-overview">
+  <div class="health-header">
+    <div class="health-score-container">
+      <div class="health-score {{ health_class }}">{{ pct }}</div>
+      <div class="health-score-label">Health Score</div>
+    </div>
+    <div class="health-details">
+      <h1>{{ health_label }}</h1>
+      <p class="health-subtitle">
+        <span class="dot {{ dot_cls }}"></span>
+        {{ up }} of {{ total }} sites operational
+        {% if down > 0 %}<span class="sep">·</span><span class="status-down">{{ down }} down</span>{% endif %}
+      </p>
+    </div>
+    <div class="health-actions">
+      <a href="{{ url_for('web.dashboard') }}" class="btn btn-subtle btn-sm" title="Refresh dashboard">↻ Refresh</a>
     </div>
   </div>
-  <div class="status-bar-right">
-    <div class="meta-item" style="margin-right:8px;">
-      <span>Monitored sites</span>
-      <strong>{{ total }}</strong>
-    </div>
-    <div class="meta-item" style="margin-right:16px;">
-      <span>Fleet health</span>
-      <strong class="{{ pill_cls }}" style="padding:2px 8px;">{{ pct }}%</strong>
-    </div>
-    <a href="{{ url_for('web.dashboard') }}" class="btn btn-secondary btn-sm">↻ Refresh</a>
-  </div>
-</div>
+</section>
 
-{# ── 2. KEY METRICS ── #}
-<div class="metrics-row">
+<!-- KEY METRICS GRID -->
+<section class="metrics-section">
+  <div class="metrics-grid">
 
-  <div class="metric-card">
-    <div class="metric-card-top">
-      <div>
-        <div class="metric-label">Fleet Uptime</div>
-        <div class="metric-value {% if up_pct >= 99 %}val-green{% elif up_pct >= 90 %}val-yellow{% else %}val-red{% endif %}">{{ up_pct }}%</div>
+    <div class="metric-cell">
+      <div class="metric-label">Fleet Uptime</div>
+      <div class="metric-value {% if up_pct >= 99 %}text-success{% elif up_pct >= 90 %}text-warning{% else %}text-error{% endif %}">{{ up_pct }}%</div>
+      <p class="metric-note">{{ up }} / {{ total }} sites responding</p>
+    </div>
+
+    <div class="metric-cell">
+      <div class="metric-label">SSL Health</div>
+      <div class="metric-value {% if ssl_critical == 0 %}text-success{% elif ssl_critical <= 2 %}text-warning{% else %}text-error{% endif %}">
+        {% if ssl_critical == 0 %}All Valid{% else %}{{ ssl_critical }} ⚠{% endif %}
       </div>
-      <div class="metric-card-icon {% if up_pct >= 99 %}green{% elif up_pct >= 90 %}yellow{% else %}red{% endif %}">🟢</div>
+      <p class="metric-note">
+        {% if ssl_critical == 0 %}All certificates valid
+        {% else %}{{ ssl_critical }} expiring soon{% endif %}
+      </p>
     </div>
-    <div class="metric-footer">
-      <span class="pill {% if up_pct >= 99 %}pill-green{% elif up_pct >= 90 %}pill-yellow{% else %}pill-red{% endif %}">{{ up }} up · {{ down }} down</span>
-    </div>
-    <div class="metric-insight">{{ up }} of {{ total }} sites responding normally.</div>
-  </div>
 
-  <div class="metric-card">
-    <div class="metric-card-top">
-      <div>
-        <div class="metric-label">SSL Health</div>
-        <div class="metric-value {% if ssl_critical == 0 %}val-green{% elif ssl_critical <= 2 %}val-yellow{% else %}val-red{% endif %}">
-          {% if ssl_critical == 0 %}OK{% else %}{{ ssl_critical }} ⚠{% endif %}
-        </div>
+    <div class="metric-cell">
+      <div class="metric-label">Avg SEO Score</div>
+      <div class="metric-value {% if avg_seo >= 80 %}text-success{% elif avg_seo >= 60 %}text-warning{% else %}text-error{% endif %}">{{ avg_seo }}<span class="metric-unit">/100</span></div>
+      <p class="metric-note">Across {{ seo_scores | length }} sites</p>
+    </div>
+
+    <div class="metric-cell">
+      <div class="metric-label">DNS Health</div>
+      <div class="metric-value {% if dns_issue_count == 0 and dns_checked > 0 %}text-success{% elif dns_issue_count == 0 %}text-muted{% elif dns_issue_count <= 2 %}text-warning{% else %}text-error{% endif %}">
+        {% if dns_issue_count == 0 and dns_checked > 0 %}OK{% elif dns_issue_count == 0 %}—{% else %}{{ dns_issue_count }}{% endif %}
       </div>
-      <div class="metric-card-icon {% if ssl_critical == 0 %}green{% elif ssl_critical <= 2 %}yellow{% else %}red{% endif %}">🔒</div>
+      <p class="metric-note">
+        {% if dns_checked == 0 %}Checks pending
+        {% elif dns_issue_count == 0 %}{{ dns_checked }} checked
+        {% else %}{{ dns_issue_count }} issue(s){% endif %}
+      </p>
     </div>
-    <div class="metric-footer">
-      <span class="pill {% if ssl_critical == 0 %}pill-green{% else %}pill-yellow{% endif %}">
-        {% if ssl_critical == 0 %}All valid{% else %}{{ ssl_critical }} expiring soon{% endif %}
-      </span>
-    </div>
-    <div class="metric-insight">
-      {% if ssl_critical == 0 %}All certificates valid and healthy.
-      {% else %}{{ ssl_critical }} cert(s) expire within 14 days.{% endif %}
-    </div>
-  </div>
 
-  <div class="metric-card">
-    <div class="metric-card-top">
-      <div>
-        <div class="metric-label">Avg SEO Score</div>
-        <div class="metric-value {% if avg_seo >= 80 %}val-green{% elif avg_seo >= 60 %}val-yellow{% else %}val-red{% endif %}">
-          {{ avg_seo }}<span class="val-muted" style="font-size:1rem;font-weight:500;">/100</span>
-        </div>
+    <div class="metric-cell">
+      <div class="metric-label">Avg Latency</div>
+      <div class="metric-value {% if avg_ms and avg_ms < 800 %}text-success{% elif avg_ms and avg_ms < 2000 %}text-warning{% elif avg_ms %}text-error{% else %}text-muted{% endif %}">
+        {% if avg_ms %}{{ avg_ms }}<span class="metric-unit">ms</span>{% else %}—{% endif %}
       </div>
-      <div class="metric-card-icon {% if avg_seo >= 80 %}green{% elif avg_seo >= 60 %}yellow{% else %}red{% endif %}">📈</div>
+      <p class="metric-note">
+        {% if avg_ms and avg_ms >= 2000 %}Above threshold
+        {% elif avg_ms %}Acceptable
+        {% else %}No data{% endif %}
+      </p>
     </div>
-    <div class="metric-footer">
-      <span class="pill {% if avg_seo >= 80 %}pill-green{% elif avg_seo >= 60 %}pill-yellow{% else %}pill-red{% endif %}">
-        {% if avg_seo >= 80 %}Good{% elif avg_seo >= 60 %}Fair{% else %}Poor{% endif %}
-      </span>
-    </div>
-    <div class="metric-insight">Fleet average across {{ seo_scores | length }} scored sites.</div>
-  </div>
 
-  <div class="metric-card">
-    <div class="metric-card-top">
-      <div>
-        <div class="metric-label">DNS Health</div>
-        <div class="metric-value {% if dns_issue_count == 0 and dns_checked > 0 %}val-green{% elif dns_issue_count == 0 %}val-muted{% elif dns_issue_count <= 2 %}val-yellow{% else %}val-red{% endif %}">
-          {% if dns_issue_count == 0 and dns_checked > 0 %}OK{% elif dns_issue_count == 0 %}&mdash;{% else %}{{ dns_issue_count }}{% endif %}
-        </div>
+  </div>
+</section>
+
+<!-- ACTIVE INCIDENTS (only when needed) -->
+{% if down_sites or ssl_warn or dns_failed or dns_hijack or dns_nschange %}
+<section class="incidents-section">
+  <div class="incidents-header">
+    <h2>{{ (down_sites | length) + (ssl_warn | length) + dns_issue_count }} Active Issue(s)</h2>
+    <span class="incidents-subtitle">Requires attention</span>
+  </div>
+  <div class="incidents-list">
+    {% for site in down_sites %}
+    <div class="incident-row incident-high">
+      <div class="incident-dot"></div>
+      <div class="incident-body">
+        <div class="incident-title">{{ site.display_name() }} — Down</div>
+        <div class="incident-message">{{ site.last_error_message or 'No response from server' }}</div>
       </div>
-      <div class="metric-card-icon {% if dns_issue_count == 0 and dns_checked > 0 %}green{% elif dns_issue_count == 0 %}yellow{% elif dns_issue_count <= 2 %}yellow{% else %}red{% endif %}">DNS</div>
+      <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="incident-action">Inspect →</a>
     </div>
-    <div class="metric-footer">
-      <span class="pill {% if dns_issue_count == 0 and dns_checked > 0 %}pill-green{% elif dns_issue_count == 0 %}pill-gray{% elif dns_issue_count <= 2 %}pill-yellow{% else %}pill-red{% endif %}">
-        {% if dns_checked == 0 %}No checks yet{% elif dns_issue_count == 0 %}{{ dns_checked }} checked{% else %}{{ dns_issue_count }} issue(s){% endif %}
-      </span>
-    </div>
-    <div class="metric-insight">
-      {% if dns_checked == 0 %}DNS checks have not completed yet.
-      {% elif dns_issue_count == 0 %}DNS resolution and nameservers look stable.
-      {% else %}Review failed resolution, IP, or nameserver changes.{% endif %}
-    </div>
-  </div>
-
-  <div class="metric-card">
-    <div class="metric-card-top">
-      <div>
-        <div class="metric-label">Avg Latency</div>
-        <div class="metric-value {% if avg_ms and avg_ms < 800 %}val-green{% elif avg_ms and avg_ms < 2000 %}val-yellow{% elif avg_ms %}val-red{% else %}val-muted{% endif %}">
-          {% if avg_ms %}{{ avg_ms }}<span class="val-muted" style="font-size:1rem;font-weight:500;">ms</span>{% else %}—{% endif %}
-        </div>
+    {% endfor %}
+    {% for site in ssl_warn %}
+    <div class="incident-row incident-warning">
+      <div class="incident-dot"></div>
+      <div class="incident-body">
+        <div class="incident-title">{{ site.display_name() }} — SSL Expiring</div>
+        <div class="incident-message">{{ site.ssl_days_remaining }} days remaining</div>
       </div>
-      <div class="metric-card-icon {% if avg_ms and avg_ms < 800 %}green{% elif avg_ms and avg_ms < 2000 %}yellow{% else %}red{% endif %}">⚡</div>
+      <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="incident-action">View →</a>
     </div>
-    <div class="metric-footer">
-      <span class="pill {% if avg_ms and avg_ms < 800 %}pill-green{% elif avg_ms and avg_ms < 2000 %}pill-yellow{% elif avg_ms %}pill-red{% else %}pill-gray{% endif %}">
-        {% if avg_ms and avg_ms < 800 %}Fast{% elif avg_ms and avg_ms < 2000 %}Moderate{% elif avg_ms %}Slow{% else %}No data{% endif %}
-      </span>
+    {% endfor %}
+    {% for site in dns_failed %}
+    <div class="incident-row incident-high">
+      <div class="incident-dot"></div>
+      <div class="incident-body">
+        <div class="incident-title">{{ site.display_name() }} — DNS Failed</div>
+        <div class="incident-message">{{ site.dns_last_error or 'DNS did not resolve' }}</div>
+      </div>
+      <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="incident-action">Inspect →</a>
     </div>
-    <div class="metric-insight">
-      {% if avg_ms and avg_ms >= 2000 %}Above 2s threshold — investigate slow sites.
-      {% elif avg_ms %}Response times within acceptable range.
-      {% else %}No latency data yet.{% endif %}
+    {% endfor %}
+    {% for site in dns_hijack %}
+    <div class="incident-row incident-warning">
+      <div class="incident-dot"></div>
+      <div class="incident-body">
+        <div class="incident-title">{{ site.display_name() }} — DNS IP Changed</div>
+        <div class="incident-message">Latest: {{ (site.dns_last_ips or []) | join(', ') or 'Unknown' }}</div>
+      </div>
+      <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="incident-action">View →</a>
     </div>
+    {% endfor %}
+    {% for site in dns_nschange %}
+    <div class="incident-row incident-warning">
+      <div class="incident-dot"></div>
+      <div class="incident-body">
+        <div class="incident-title">{{ site.display_name() }} — Nameserver Changed</div>
+        <div class="incident-message">{{ (site.dns_last_ns or []) | join(', ') or 'Unknown' }}</div>
+      </div>
+      <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="incident-action">View →</a>
+    </div>
+    {% endfor %}
   </div>
+</section>
+{% endif %}
 
-</div>
+<!-- MAIN CONTENT GRID -->
+<div class="dashboard-grid">
 
-{# ── 3. MAIN GRID ── #}
-<div class="dash-grid">
-  <div class="dash-main">
-
-    {# Active Issues — only shown when there are problems #}
-    {% if down_sites or ssl_warn or dns_failed or dns_hijack or dns_nschange %}
-    <div class="card">
-      <div class="section-head">
+  <!-- PRIMARY: SITES TABLE -->
+  <main class="dashboard-main">
+    <section class="table-section">
+      <div class="section-header">
         <div>
-          <div class="label">Active Issues</div>
-          <h2>{{ (down_sites | length) + (ssl_warn | length) + dns_issue_count }} issue(s) require attention</h2>
+          <h2>Fleet Status</h2>
+          <p class="section-description">Monitored properties and real-time performance</p>
         </div>
-      </div>
-      <div class="activity-list">
-        {% for site in down_sites %}
-        <div class="activity-item">
-          <div class="dot dot-red" style="margin-top:3px;"></div>
-          <div class="activity-body">
-            <div class="activity-title">
-              <span class="pill pill-red" style="margin-right:6px;">HIGH</span>
-              {{ site.display_name() }} is DOWN
-            </div>
-            <div class="small muted" style="margin-top:2px;">
-              {{ site.last_error_message or 'No response from server' }} ·
-              <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="val-blue">Inspect →</a>
-            </div>
-          </div>
-          <span class="pill pill-red">DOWN</span>
-        </div>
-        {% endfor %}
-        {% for site in ssl_warn %}
-        <div class="activity-item">
-          <div class="dot dot-yellow" style="margin-top:3px;"></div>
-          <div class="activity-body">
-            <div class="activity-title">
-              <span class="pill pill-yellow" style="margin-right:6px;">MEDIUM</span>
-              SSL expiring — {{ site.display_name() }}
-            </div>
-            <div class="small muted" style="margin-top:2px;">
-              {{ site.ssl_days_remaining }} days remaining · Issuer: {{ site.ssl_issuer or 'Unknown' }} ·
-              <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="val-blue">View →</a>
-            </div>
-          </div>
-          <span class="pill pill-yellow">{{ site.ssl_days_remaining }}d</span>
-        </div>
-        {% endfor %}
-        {% for site in dns_failed %}
-        <div class="activity-item">
-          <div class="dot dot-red" style="margin-top:3px;"></div>
-          <div class="activity-body">
-            <div class="activity-title">
-              <span class="pill pill-red" style="margin-right:6px;">HIGH</span>
-              DNS failed - {{ site.display_name() }}
-            </div>
-            <div class="small muted" style="margin-top:2px;">
-              {{ site.dns_last_error or 'DNS did not resolve' }} &middot;
-              <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="val-blue">Inspect &rarr;</a>
-            </div>
-          </div>
-          <span class="pill pill-red">DNS</span>
-        </div>
-        {% endfor %}
-        {% for site in dns_hijack %}
-        <div class="activity-item">
-          <div class="dot dot-yellow" style="margin-top:3px;"></div>
-          <div class="activity-body">
-            <div class="activity-title">
-              <span class="pill pill-yellow" style="margin-right:6px;">MEDIUM</span>
-              DNS IP changed - {{ site.display_name() }}
-            </div>
-            <div class="small muted" style="margin-top:2px;">
-              Latest IPs: {{ (site.dns_last_ips or []) | join(', ') or 'Unknown' }} &middot;
-              <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="val-blue">View &rarr;</a>
-            </div>
-          </div>
-          <span class="pill pill-yellow">IP</span>
-        </div>
-        {% endfor %}
-        {% for site in dns_nschange %}
-        <div class="activity-item">
-          <div class="dot dot-yellow" style="margin-top:3px;"></div>
-          <div class="activity-body">
-            <div class="activity-title">
-              <span class="pill pill-yellow" style="margin-right:6px;">MEDIUM</span>
-              Nameserver changed - {{ site.display_name() }}
-            </div>
-            <div class="small muted" style="margin-top:2px;">
-              Current NS: {{ (site.dns_last_ns or []) | join(', ') or 'Unknown' }} &middot;
-              <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="val-blue">View &rarr;</a>
-            </div>
-          </div>
-          <span class="pill pill-yellow">NS</span>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-    {% endif %}
-
-    {# Site cards #}
-    <div class="card">
-      <div class="section-head">
-        <div>
-          <div class="label">Fleet Status</div>
-          <h2>Monitored Properties</h2>
-        </div>
-        <span class="pill pill-gray">{{ total }} sites</span>
+        <span class="badge">{{ total }} sites</span>
       </div>
 
       {% if site_cards %}
-      <div class="site-grid">
-        {% for site in site_cards %}
-        <article class="site-card status-{{ site.app_status }}"
-                 id="site-card-{{ site.id }}"
-                 data-site-id="{{ site.id }}"
-                 data-status="{{ site.app_status }}">
-
-          <div class="site-card-header">
-            <div style="min-width:0;">
-              <div class="site-card-name truncate">{{ site.display_name() }}</div>
-              <div class="site-card-url">{{ site.url }}</div>
-            </div>
-            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-              {% if site.app_status == 'checking' %}<div class="spinner"></div>{% endif %}
-              <span class="pill {% if site.current_status == 'UP' %}pill-green{% elif site.current_status == 'DOWN' %}pill-red{% elif site.current_status == 'DEGRADED' %}pill-yellow{% else %}pill-gray{% endif %}">
-                {{ site.current_status }}
-              </span>
-            </div>
-          </div>
-
-          <div class="site-card-metrics">
-            <div class="site-metric-mini">
-              <div class="label">Latency</div>
-              <strong class="{% if site.last_response_time and site.last_response_time < 0.8 %}val-green{% elif site.last_response_time and site.last_response_time < 2 %}val-yellow{% elif site.last_response_time %}val-red{% else %}val-muted{% endif %}">
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Site</th>
+              <th>Status</th>
+              <th>Response</th>
+              <th>SSL</th>
+              <th>SEO</th>
+              <th>Last checked</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for site in site_cards %}
+            {% set last_checked = site.last_uptime_check_at or site.last_ssl_check_at or site.created_at %}
+            <tr>
+              <td class="cell-site">
+                <div class="site-name">{{ site.display_name() }}</div>
+                <div class="site-url">{{ site.url }}</div>
+              </td>
+              <td class="cell-status">
+                <span class="status-badge status-{{ site.current_status | lower }}">
+                  <span class="status-indicator"></span>
+                  {{ site.current_status }}
+                </span>
+              </td>
+              <td class="cell-metric {% if site.last_response_time and site.last_response_time < 0.8 %}text-success{% elif site.last_response_time and site.last_response_time < 2 %}text-warning{% elif site.last_response_time %}text-error{% else %}text-muted{% endif %}">
                 {% if site.last_response_time %}{{ '%.2f'|format(site.last_response_time) }}s{% else %}—{% endif %}
-              </strong>
-            </div>
-            <div class="site-metric-mini">
-              <div class="label">SSL</div>
-              <strong class="{% if site.ssl_days_remaining is not none and site.ssl_days_remaining < 7 %}val-red{% elif site.ssl_days_remaining is not none and site.ssl_days_remaining < 14 %}val-yellow{% elif site.ssl_days_remaining is not none %}val-green{% else %}val-muted{% endif %}">
+              </td>
+              <td class="cell-metric {% if site.ssl_days_remaining is not none and site.ssl_days_remaining < 7 %}text-error{% elif site.ssl_days_remaining is not none and site.ssl_days_remaining < 14 %}text-warning{% elif site.ssl_days_remaining is not none %}text-success{% else %}text-muted{% endif %}">
                 {% if site.ssl_days_remaining is not none %}{{ site.ssl_days_remaining }}d{% else %}—{% endif %}
-              </strong>
-            </div>
-            <div class="site-metric-mini">
-              <div class="label">SEO</div>
-              <strong class="{% if site.seo_score >= 80 %}val-green{% elif site.seo_score >= 60 %}val-yellow{% elif site.seo_score > 0 %}val-red{% else %}val-muted{% endif %}">
+              </td>
+              <td class="cell-metric {% if site.seo_score >= 80 %}text-success{% elif site.seo_score >= 60 %}text-warning{% elif site.seo_score > 0 %}text-error{% else %}text-muted{% endif %}">
                 {% if site.last_seo_fetch_valid is sameas false %}Invalid
                 {% elif site.seo_score > 0 %}{{ site.seo_score }}
                 {% else %}—{% endif %}
-              </strong>
-            </div>
-            <div class="site-metric-mini">
-              <div class="label">DNS</div>
-              <strong class="{% if site.dns_status == 'failed' or site.dns_hijack_suspected or site.dns_ns_changed %}val-red{% elif site.dns_status == 'done' and site.dns_resolved %}val-green{% elif site.dns_status == 'running' %}val-yellow{% else %}val-muted{% endif %}">
-                {% if site.dns_status == 'failed' %}Failed
-                {% elif site.dns_hijack_suspected %}IP change
-                {% elif site.dns_ns_changed %}NS change
-                {% elif site.dns_status == 'done' and site.dns_resolved %}OK
-                {% elif site.dns_status == 'running' %}Checking
-                {% else %}&mdash;{% endif %}
-              </strong>
-            </div>
-          </div>
-
-          <div class="site-card-footer">
-            <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="btn btn-ghost btn-sm">View Report →</a>
-            <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='all') }}" style="margin:0;">
-              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-              <input type="hidden" name="next" value="{{ url_for('web.dashboard') }}">
-              <button type="submit" class="btn btn-secondary btn-sm"
-                      {% if site.app_status == 'checking' %}disabled{% endif %}>↻ Scan</button>
-            </form>
-          </div>
-
-        </article>
-        {% endfor %}
+              </td>
+              <td class="cell-date">
+                {% if last_checked %}{{ last_checked | localtime | strftime('%b %d, %H:%M') }}{% else %}—{% endif %}
+              </td>
+              <td class="cell-action">
+                <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="btn btn-minimal">View</a>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
       </div>
       {% else %}
       <div class="empty-state">
+        <div class="empty-state-icon">📡</div>
         <h3>No sites monitored yet</h3>
-        <p>Add your first website using the form on the right.</p>
+        <p>Add your first website using the form on the right</p>
       </div>
       {% endif %}
-    </div>
+    </section>
+  </main>
 
-  </div>{# /dash-main #}
+  <!-- SECONDARY: SIDEBAR -->
+  <aside class="dashboard-sidebar">
 
-  <div class="dash-side">
-
-    <div class="card">
-      <div class="section-head">
-        <div>
-          <div class="label">Add Monitor</div>
-          <h2>Track a new site</h2>
-        </div>
-      </div>
-      <form method="post" action="{{ url_for('web.create_site') }}" class="add-site-form">
+    <!-- Add Site Form -->
+    <section class="sidebar-card">
+      <h3>Add Monitor</h3>
+      <form method="post" action="{{ url_for('web.create_site') }}" class="sidebar-form">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
         <div class="form-group">
-          <label>Label <span class="val-muted" style="font-weight:400;">(optional)</span></label>
-          <input type="text" name="name" placeholder="e.g. Production">
+          <label>Site Label <span class="label-optional">(optional)</span></label>
+          <input type="text" name="name" placeholder="Production" class="form-input">
         </div>
+
         <div class="form-group">
           <label>URL</label>
-          <input type="text" name="url" placeholder="https://example.com" required>
+          <input type="text" name="url" placeholder="https://example.com" required class="form-input">
         </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Check interval</label>
-            <select name="check_interval">
-              <option value="60">Every 1 min</option>
-              <option value="300">Every 5 min</option>
-              <option value="3600">Every hour</option>
-            </select>
-          </div>
-        </div>
-        <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;">+ Deploy Monitor</button>
-      </form>
-    </div>
 
-    <div class="card">
-      <div class="section-head">
-        <div class="label">Intelligence Feed</div>
-        <h2>Recent Anomalies</h2>
-      </div>
-      <div class="activity-list">
+        <div class="form-group">
+          <label>Check Interval</label>
+          <select name="check_interval" class="form-input">
+            <option value="60">Every 1 min</option>
+            <option value="300">Every 5 min</option>
+            <option value="3600">Every hour</option>
+          </select>
+        </div>
+
+        <button type="submit" class="btn btn-primary btn-block">+ Deploy Monitor</button>
+      </form>
+    </section>
+
+    <!-- Activity Feed -->
+    <section class="sidebar-card">
+      <h3>Recent Activity</h3>
+      <div class="activity-feed">
         {%- set anomalies = recent_uptime_logs | rejectattr('is_up') | list -%}
         {% if anomalies %}
-          {% for log in anomalies %}
+          {% for log in anomalies[:5] %}
           <div class="activity-item">
-            <div class="dot dot-red" style="margin-top:3px;"></div>
-            <div class="activity-body">
-              <div class="activity-title">{{ log.site.display_name() }}</div>
-              <div class="small muted">{{ log.error_message or 'Service unavailable' }}</div>
-              <div class="activity-time">{{ log.checked_at.strftime('%b %d, %H:%M') }}</div>
+            <div class="activity-indicator error"></div>
+            <div class="activity-content">
+              <div class="activity-site">{{ log.site.display_name() }}</div>
+              <div class="activity-message">{{ log.error_message or 'Service unavailable' }}</div>
+              <div class="activity-time">{{ log.checked_at | localtime | strftime('%b %d, %H:%M') }}</div>
             </div>
           </div>
           {% endfor %}
         {% else %}
           <div class="activity-empty">
-            <div style="font-size:1.5rem;margin-bottom:8px;">✅</div>
-            No anomalies detected. System stable.
+            <div class="activity-empty-icon">✓</div>
+            <div class="activity-empty-text">No issues. System stable.</div>
           </div>
         {% endif %}
       </div>
-    </div>
+    </section>
 
-  </div>{# /dash-side #}
-</div>{# /dash-grid #}
+  </aside>
+
+</div>
 
 {% endblock %}
 

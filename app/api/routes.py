@@ -29,19 +29,20 @@ from app.services.ssl_service import run_ssl_check
 from app.utils.lighthouse_runner import compute_cwv_rating
 from app.utils.time import normalize, now_utc
 from app.utils.urls import normalize_url
-from app.workers.tasks import run_dns_check_task, run_security_check_task, run_seo_check_task, run_ssl_check_task, run_uptime_check_task
+from app.workers.tasks import run_dns_check_task, run_full_audit_task, run_security_check_task, run_seo_check_task, run_ssl_check_task, run_uptime_check_task
 
 api_bp = Blueprint("api", __name__)
 web_bp = Blueprint("web", __name__)
 logger = logging.getLogger(__name__)
 
-# Exempt the JSON API blueprint from CSRF — it uses session auth, not form tokens.
-# Web form routes (web_bp) remain CSRF-protected.
-from app import csrf
-csrf.exempt(api_bp)
+# CSRF exemption for the API blueprint is handled in create_app()
 
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+@api_bp.route("/ping")
+def api_ping():
+    return jsonify({"pong": True})
 
 
 def login_required(f):
@@ -62,7 +63,7 @@ def _normalize_email(email: str | None) -> str:
 def _serialize_user(user: User, include_created_at: bool = False) -> dict:
     payload = {"id": user.id, "email": user.email}
     if include_created_at:
-        payload["created_at"] = user.created_at.isoformat() if user.created_at else None
+        payload["created_at"] = user.created_at.isoformat() + "Z" if user.created_at else None
     return payload
 
 
@@ -110,11 +111,17 @@ def api_register():
 
 @api_bp.route("/auth/login", methods=["POST"])
 def api_login():
-    data = request.get_json() or {}
-    user, error, status = _login_user(data.get("email"), data.get("password"))
-    if error:
-        return jsonify({"error": error}), status
-    return jsonify({"success": True, "user": _serialize_user(user)})
+    try:
+        data = request.get_json() or {}
+        user, error, status = _login_user(data.get("email"), data.get("password"))
+        if error:
+            return jsonify({"error": error}), status
+        return jsonify({"success": True, "user": _serialize_user(user)})
+    except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        logger.exception("Login failed with internal error")
+        return jsonify({"error": str(e), "traceback": error_details}), 500
 
 
 @api_bp.route("/auth/logout", methods=["POST"])
@@ -122,6 +129,61 @@ def api_login():
 def api_logout():
     session.clear()
     return jsonify({"success": True})
+
+
+@api_bp.route("/dashboard/metrics", methods=["GET"])
+@login_required
+def dashboard_metrics():
+    sites = _owned_sites_query().all()
+    response_samples = [s.last_response_time for s in sites if s.last_response_time is not None]
+    
+    # Calculate DNS health
+    dns_issue_count = 0
+    for s in sites:
+        if s.dns_status == 'failed' or s.dns_hijack_suspected or s.dns_ns_changed:
+            dns_issue_count += 1
+            
+    # Calculate SSL warnings
+    ssl_critical = 0
+    sites_with_ssl = 0
+    for s in sites:
+        if s.ssl_state == 'VALID':
+            sites_with_ssl += 1
+        if s.ssl_days_remaining is not None and s.ssl_days_remaining < 14:
+            ssl_critical += 1
+
+    metrics = _build_dashboard_metrics(sites, response_samples)
+    metrics.update({
+        "dns_issue_count": dns_issue_count,
+        "ssl_critical_count": ssl_critical,
+        "sites_with_ssl": sites_with_ssl,
+        "dns_checked_count": sum(1 for s in sites if s.last_dns_check_at is not None)
+    })
+    return jsonify(metrics)
+
+
+@api_bp.route("/dashboard/activity", methods=["GET"])
+@login_required
+def dashboard_activity():
+    sites = _owned_sites_query().all()
+    site_ids = [s.id for s in sites]
+    if not site_ids:
+        return jsonify([])
+        
+    # Get recent anomalies (DOWN sites)
+    anomalies = UptimeLog.query.filter(
+        UptimeLog.site_id.in_(site_ids),
+        UptimeLog.is_up == False
+    ).order_by(UptimeLog.checked_at.desc()).limit(10).all()
+    
+    return jsonify([{
+        "id": log.id,
+        "site_id": log.site_id,
+        "site_name": log.site.display_name(),
+        "error_message": log.error_message or "Service unavailable",
+        "checked_at": log.checked_at.isoformat() + "Z",
+        "status_code": log.status_code
+    } for log in anomalies])
 
 # ➕ Add site
 @api_bp.route("/sites", methods=["POST"])
@@ -187,6 +249,46 @@ def add_site():
 
 
 # 📃 List sites
+@api_bp.route("/dashboard/analytics", methods=["GET"])
+@login_required
+def get_fleet_analytics_api():
+    """Return aggregated fleet analytics for the user."""
+    from app.services.analytics_service import get_fleet_analytics
+    days = request.args.get("days", 7, type=int)
+    return jsonify(get_fleet_analytics(_effective_user_id(), days=days))
+
+
+@api_bp.route("/incidents", methods=["GET"])
+@login_required
+def get_all_incidents():
+    """Return recent incidents across all sites for global visibility."""
+    limit = request.args.get("limit", 20, type=int)
+    from app.models.incident import Incident
+    from app.models.site import Site
+    
+    # Join with Site to get names and ensure ownership
+    incidents = (
+        Incident.query
+        .join(Site)
+        .filter(Site.user_id == _effective_user_id())
+        .order_by(Incident.opened_at.desc())
+        .limit(limit)
+        .all()
+    )
+    
+    return jsonify([{
+        "id": inc.id,
+        "site_id": inc.site_id,
+        "site_name": inc.site.display_name(),
+        "site_url": inc.site.url,
+        "status": inc.status,
+        "opened_at": inc.opened_at.isoformat() + "Z",
+        "resolved_at": inc.resolved_at.isoformat() + "Z" if inc.resolved_at else None,
+        "duration": str(inc.resolved_at - inc.opened_at) if inc.resolved_at else None,
+        "error_message": inc.opened_error_message or "Unknown failure",
+    } for inc in incidents])
+
+
 @api_bp.route("/sites", methods=["GET"])
 @login_required
 def list_sites():
@@ -200,6 +302,51 @@ def list_sites():
             return jsonify({"error": "Invalid since datetime"}), 400
     sites = query.order_by(Site.updated_at.desc()).all()
     return jsonify([site.to_dict() for site in sites])
+
+
+@web_bp.route("/export/site/<int:site_id>", methods=["GET"])
+@login_required
+def download_site_report(site_id):
+    site = _get_owned_site_or_404(site_id)
+    fmt = request.args.get("format", "json").lower()
+
+    from app.services.report_service import generate_site_report, generate_site_pdf_report
+    
+    if fmt == "pdf":
+        pdf_bytes = generate_site_pdf_report(site.id)
+        return send_file(
+            BytesIO(pdf_bytes),
+            mimetype="application/pdf",
+            as_attachment=True,
+            download_name=f"report_{site.id}_{now_utc().strftime('%Y%m%d')}.pdf"
+        )
+    elif fmt == "csv":
+        report = generate_site_report(site.id)
+        si = StringIO()
+        cw = csv.writer(si)
+        cw.writerow(["Metric", "Value"])
+        cw.writerow(["Site", site.url])
+        cw.writerow(["Status", site.current_status])
+        cw.writerow(["SEO Score", site.seo_score])
+        cw.writerow(["SSL State", site.ssl_state])
+        cw.writerow(["DNS Integrity", "Verified" if site.dns_resolved else "Issue"])
+        
+        output = si.getvalue()
+        return send_file(
+            BytesIO(output.encode("utf-8")),
+            mimetype="text/csv",
+            as_attachment=True,
+            download_name=f"report_{site.id}.csv"
+        )
+    else:
+        report = generate_site_report(site.id)
+        from flask import Response
+        import json
+        return Response(
+            json.dumps(report, indent=2),
+            mimetype="application/json",
+            headers={"Content-disposition": f"attachment; filename=report_{site.id}.json"}
+        )
 
 
 @api_bp.route("/sites/<int:site_id>", methods=["GET"])
@@ -432,11 +579,103 @@ def get_broken_links(site_id):
     if not log:
         return jsonify({"error": "No SEO audit data yet"}), 404
     return jsonify({
-        "checked_at":      log.checked_at.isoformat(),
+        "checked_at":      log.checked_at.isoformat() + "Z",
         "links_checked":   log.links_checked,
         "broken_link_count": log.broken_link_count,
         "broken_links":    log.broken_links or {},
     })
+
+
+@api_bp.route("/sites/<int:site_id>/check", methods=["POST"])
+@login_required
+def trigger_site_check(site_id):
+    """Unified endpoint to trigger specific or all checks."""
+    site = _get_owned_site_or_404(site_id)
+    data = request.get_json() or {}
+    check_type = data.get("type", "all")
+    
+    dispatch = {}
+    
+    # Mark as running immediately so UI shows scanning state
+    if any(getattr(site, f"{t}_status") in ["running", "queued"] for t in ["uptime", "ssl", "seo", "security", "dns"]):
+        site.app_status = "checking"
+    site.is_processing = True
+    
+    if check_type == "uptime" or check_type == "all":
+        site.uptime_status = "queued"
+        dispatch["uptime"] = _safe_delay(run_uptime_check_task, site.id)
+    if check_type == "ssl" or check_type == "all":
+        site.ssl_status = "queued"
+        dispatch["ssl"] = _safe_delay(run_ssl_check_task, site.id)
+    if check_type == "seo" or check_type == "all":
+        site.seo_status = "queued"
+        dispatch["seo"] = _safe_delay(run_seo_check_task, site.id)
+    if check_type == "security" or check_type == "all":
+        site.security_status = "queued"
+        dispatch["security"] = _safe_delay(run_security_check_task, site.id)
+    if check_type == "dns" or check_type == "all":
+        site.dns_status = "queued"
+        dispatch["dns"] = _safe_delay(run_dns_check_task, site.id)
+    
+    db.session.commit()
+    
+    return jsonify({"message": f"Checks triggered: {check_type}", "dispatch": dispatch})
+
+
+@api_bp.route("/sites/<int:site_id>/report", methods=["GET"])
+@login_required
+def download_site_report(site_id):
+    """Generate and return site report in requested format."""
+    site = _get_owned_site_or_404(site_id)
+    fmt = request.args.get("format", "json").lower()
+    
+    from app.services.report_service import generate_site_report
+    report_data = generate_site_report(site.id)
+    
+    if not report_data:
+        return jsonify({"error": "Failed to generate report"}), 500
+        
+    if fmt == "pdf":
+        from app.services.report_service import generate_site_pdf_report
+        pdf_data = generate_site_pdf_report(site.id)
+        return Response(
+            pdf_data,
+            mimetype="application/pdf",
+            headers={"Content-disposition": f"attachment; filename=report_{site.id}.pdf"}
+        )
+        
+    if fmt == "csv":
+        import io, csv
+        from flask import Response
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Category", "Metric", "Value", "Checked At"])
+        
+        # Uptime
+        writer.writerow(["Uptime", "Status", report_data["uptime"]["current_status"], report_data["uptime"]["last_check_at"]])
+        writer.writerow(["Uptime", "Latency (ms)", int(report_data["uptime"]["last_response_time"]*1000) if report_data["uptime"]["last_response_time"] else "N/A", ""])
+        
+        # SSL
+        writer.writerow(["SSL", "Issuer", report_data["ssl"]["issuer"], report_data["ssl"]["last_check_at"]])
+        writer.writerow(["SSL", "Days Remaining", report_data["ssl"]["days_remaining"], ""])
+        
+        # SEO
+        writer.writerow(["SEO", "Score", report_data["seo"]["score"], report_data["seo"]["last_check_at"]])
+        
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-disposition": f"attachment; filename=report_{site.id}.csv"}
+        )
+    
+    # Default to JSON
+    from flask import Response
+    import json
+    return Response(
+        json.dumps(report_data, indent=2),
+        mimetype="application/json",
+        headers={"Content-disposition": f"attachment; filename=report_{site.id}.json"}
+    )
 
 
 @api_bp.route("/sites/<int:site_id>/tech-stack", methods=["GET"])
@@ -453,7 +692,7 @@ def get_tech_stack(site_id):
     if not log:
         return jsonify({"error": "No SEO audit data yet"}), 404
     return jsonify({
-        "checked_at": log.checked_at.isoformat(),
+        "checked_at": log.checked_at.isoformat() + "Z",
         "tech_stack": log.tech_stack or {},
         "tech_flat":  log.tech_flat or [],
         "tech_diff":  log.tech_diff or {},
@@ -491,7 +730,7 @@ def get_lighthouse_data(site_id: int):
     return jsonify({
         "performance_score": log.lh_performance_score,
         "audit_method": log.lh_audit_method or "playwright_perf",
-        "audited_at": log.lh_audited_at.isoformat() if log.lh_audited_at else None,
+        "audited_at": log.lh_audited_at.isoformat() + "Z" if log.lh_audited_at else None,
         "error": log.lh_error,
         "metrics": {
             "lcp": {
@@ -964,11 +1203,7 @@ def run_check(site_id, check_type):
         _safe_delay(run_dns_check_task, site_id)
         message = f"DNS check queued for {site.url}."
     elif check_type == "all":
-        _safe_delay(run_uptime_check_task, site_id)
-        _safe_delay(run_ssl_check_task, site_id)
-        _safe_delay(run_seo_check_task, site_id)
-        _safe_delay(run_security_check_task, site_id)
-        _safe_delay(run_dns_check_task, site_id)
+        _safe_delay(run_full_audit_task, site_id)
         message = f"Full SaaS monitoring suite queued for {site.url}."
     else:
         abort(404)
@@ -995,12 +1230,23 @@ def site_analytics(site_id):
     )
 
 
+@web_bp.route("/site/<int:site_id>/delete", methods=["POST"])
+@login_required
+def delete_site_web(site_id):
+    site = _get_owned_site_or_404(site_id)
+    db.session.delete(site)
+    db.session.commit()
+    flash("Site deleted.", "success")
+    return redirect(url_for("web.dashboard"))
+
+
 def _build_dashboard_metrics(sites, response_samples):
     monitored_sites = len(sites)
     sites_up = sum(1 for site in sites if site.current_status == "UP")
     sites_down = sum(1 for site in sites if site.current_status == "DOWN")
     avg_response = mean(response_samples) if response_samples else None
     health_score = round((sites_up / monitored_sites) * 100) if monitored_sites else 0
+    seo_avg = round(sum(s.seo_score for s in sites) / monitored_sites) if monitored_sites else 0
 
     return {
         "monitored_sites": monitored_sites,
@@ -1008,6 +1254,7 @@ def _build_dashboard_metrics(sites, response_samples):
         "sites_down": sites_down,
         "avg_response": avg_response,
         "health_score": health_score,
+        "seo_avg_score": seo_avg,
     }
 
 

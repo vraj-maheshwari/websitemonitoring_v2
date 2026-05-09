@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Website Monitor{% endblock %}</title>
+  <title>{% block title %}Pulse - WebMonitor{% endblock %}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -14,10 +14,10 @@
 
   <header class="topbar">
     <a class="brand" href="{{ url_for('web.dashboard') }}">
-      <div class="brand-mark">WM</div>
+      <div class="brand-mark">P</div>
       <div>
-        <strong>WebMonitor</strong>
-        <small>Operations Platform</small>
+        <strong>Pulse</strong>
+        <small>Monitor Platform</small>
       </div>
     </a>
     <nav class="topbar-nav">
@@ -25,7 +25,7 @@
     </nav>
     <div class="topbar-right">
       {% if session.get('user_id') %}
-        <span class="pill pill-gray" style="font-size:.72rem;">{{ session.get('user_email', '') }}</span>
+        <span class="pill pill-gray" style="font-size:.68rem;font-family:var(--font-mono);">{{ session.get('user_email', '') }}</span>
         <form method="post" action="{{ url_for('web.logout') }}" style="margin:0;">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button type="submit" class="btn btn-secondary btn-sm">Sign Out</button>
@@ -38,7 +38,7 @@
 
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% if messages %}
-      <div style="max-width:1440px;margin:0 auto;padding:12px 32px 0;">
+      <div style="max-width:1480px;margin:0 auto;padding:12px 28px 0;">
         <div class="flash-stack">
           {% for category, message in messages %}
             <div class="flash flash-{{ category }}">{{ message }}</div>

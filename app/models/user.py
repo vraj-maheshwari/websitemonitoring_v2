@@ -22,4 +22,4 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "email": self.email, "created_at": self.created_at.isoformat()}
+        return {"id": self.id, "email": self.email, "created_at": self.created_at.isoformat() + "Z"}

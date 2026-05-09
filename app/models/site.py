@@ -102,6 +102,8 @@ class Site(db.Model):
     # ── Denormalized CWV (from latest successful Playwright audit) ─
     lh_performance_score = db.Column(db.Integer, nullable=True)
     lh_lcp_ms            = db.Column(db.Float,   nullable=True)
+    lh_tbt_ms            = db.Column(db.Float,   nullable=True)
+    lh_fcp_ms            = db.Column(db.Float,   nullable=True)
     lh_cls               = db.Column(db.Float,   nullable=True)
 
     # Relationships
@@ -112,6 +114,12 @@ class Site(db.Model):
     incidents = db.relationship("Incident", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     alert_history = db.relationship("AlertHistory", backref="site", lazy="dynamic", cascade="all, delete-orphan")
     daily_summaries = db.relationship("DailyUptimeSummary", backref="site", lazy="dynamic", cascade="all, delete-orphan")
+
+    @property
+    def security_headers(self) -> dict:
+        from app.models.seo_log import SEOLog
+        log = SEOLog.query.filter_by(site_id=self.id).order_by(SEOLog.checked_at.desc()).first()
+        return log.security_headers if log else {}
 
     def display_name(self) -> str:
         return self.name or self.url
@@ -130,6 +138,7 @@ class Site(db.Model):
             "last_response_time": self.last_response_time,
             "last_ttfb": self.last_ttfb,
             "ssl_state": self.ssl_state,
+            "ssl_issuer": self.ssl_issuer,
             "ssl_days_remaining": self.ssl_days_remaining,
             "ssl_expiry_date": self.ssl_expiry_date.isoformat() if self.ssl_expiry_date else None,
             "seo_state": self.seo_state,
@@ -137,6 +146,7 @@ class Site(db.Model):
             "last_seo_fetch_valid": self.last_seo_fetch_valid,
             "security_score": self.security_score,
             "security_grade": self.security_grade,
+            "security_headers": self.security_headers,
             "dns_resolved": self.dns_resolved,
             "dns_resolution_time_ms": self.dns_resolution_time_ms,
             "dns_last_ips": self.dns_last_ips or [],
@@ -148,14 +158,16 @@ class Site(db.Model):
             "lighthouse": {
                 "performance_score": self.lh_performance_score,
                 "lcp_ms": self.lh_lcp_ms,
+                "tbt_ms": self.lh_tbt_ms,
+                "fcp_ms": self.lh_fcp_ms,
                 "cls": self.lh_cls,
                 "has_data": self.lh_performance_score is not None,
             },
-            "last_uptime_check_at": self.last_uptime_check_at.isoformat() if self.last_uptime_check_at else None,
-            "last_ssl_check_at": self.last_ssl_check_at.isoformat() if self.last_ssl_check_at else None,
-            "last_seo_check_at": self.last_seo_check_at.isoformat() if self.last_seo_check_at else None,
-            "last_security_check_at": self.last_security_check_at.isoformat() if self.last_security_check_at else None,
-            "last_dns_check_at": self.last_dns_check_at.isoformat() if self.last_dns_check_at else None,
+            "last_uptime_check_at": self.last_uptime_check_at.isoformat() + "Z" if self.last_uptime_check_at else None,
+            "last_ssl_check_at": self.last_ssl_check_at.isoformat() + "Z" if self.last_ssl_check_at else None,
+            "last_seo_check_at": self.last_seo_check_at.isoformat() + "Z" if self.last_seo_check_at else None,
+            "last_security_check_at": self.last_security_check_at.isoformat() + "Z" if self.last_security_check_at else None,
+            "last_dns_check_at": self.last_dns_check_at.isoformat() + "Z" if self.last_dns_check_at else None,
             "next_check_at": self.next_check_at.isoformat() if self.next_check_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -171,7 +183,7 @@ class Site(db.Model):
             self.app_status = "pending"
             return
 
-        if any(s == "running" for s in statuses):
+        if any(s in ["running", "queued"] for s in statuses):
             self.app_status = "checking"
         elif all(s == "done" for s in statuses):
             self.app_status = "ready"

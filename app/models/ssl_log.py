@@ -31,13 +31,13 @@ class SSLLog(db.Model):
         return {
             "id":             self.id,
             "site_id":        self.site_id,
-            "expiry_date":    self.expiry_date.isoformat() if self.expiry_date else None,
+            "expiry_date":    self.expiry_date.isoformat() + "Z" if self.expiry_date else None,
             "days_remaining": self.days_remaining,
             "is_valid":       self.is_valid,
             "state":          self.state,
             "issuer":         self.issuer,
             "error_message":  self.error_message,
-            "checked_at":     self.checked_at.isoformat(),
+            "checked_at":     self.checked_at.isoformat() + "Z",
         }
 
     def __repr__(self) -> str:

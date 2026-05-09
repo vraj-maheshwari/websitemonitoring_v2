@@ -43,8 +43,11 @@ class LinkResult:
 
 @dataclass
 class BrokenLinkReport:
-    total_checked: int
+    total_found: int          # Total links found in HTML (before deduplication)
+    total_checked: int        # Total unique links tested
     broken_count: int
+    internal_count: int       # Unique internal links
+    external_count: int       # Unique external links
     broken: list[LinkResult] = field(default_factory=list)
     ok: list[LinkResult]     = field(default_factory=list)
     skipped: int             = 0
@@ -58,21 +61,18 @@ def check_broken_links(
 ) -> BrokenLinkReport:
     """
     Check a list of link dicts (from parse_seo_intelligence) for broken URLs.
-
-    Args:
-        links:     List of {"url": str, "text": str, "type": "internal"|"external"}
-        base_url:  The page's canonical URL (used to resolve relative hrefs)
-        max_links: Maximum number of links to check (default 50)
-
-    Returns:
-        BrokenLinkReport
     """
     if not links:
-        return BrokenLinkReport(total_checked=0, broken_count=0)
+        return BrokenLinkReport(total_found=0, total_checked=0, broken_count=0, internal_count=0, external_count=0)
 
+    total_found = len(links)
+    
     # Resolve and deduplicate
     resolved: list[tuple[str, str, str]] = []  # (absolute_url, type, anchor_text)
     seen: set[str] = set()
+
+    internal_unique = 0
+    external_unique = 0
 
     for link in links:
         href = (link.get("url") or "").strip()
@@ -86,21 +86,29 @@ def check_broken_links(
         if href.startswith("#"):
             continue
 
-        # Resolve relative URLs
+        # Resolve and Normalize relative URLs
         absolute = urljoin(base_url, href)
-        parsed_abs = urlparse(absolute)
-        if parsed_abs.scheme not in ("http", "https"):
+        
+        # Strip trailing slash for stricter deduplication
+        norm_url = absolute.rstrip('/')
+        
+        if norm_url in seen:
             continue
+        seen.add(norm_url)
+        
+        l_type = link.get("type", "external")
+        resolved.append((absolute, l_type, link.get("text", "")))
 
-        # Deduplicate
-        if absolute in seen:
-            continue
-        seen.add(absolute)
-
-        resolved.append((absolute, link.get("type", "external"), link.get("text", "")))
-
+    # Only count what we are actually going to check
     skipped = max(0, len(resolved) - max_links)
     to_check = resolved[:max_links]
+    
+    # Final Math Lock: Count based on the actual list being checked
+    for _, l_type, _ in to_check:
+        if l_type == "internal":
+            internal_unique += 1
+        else:
+            external_unique += 1
 
     results: list[LinkResult] = []
     with ThreadPoolExecutor(max_workers=_CONCURRENCY) as pool:
@@ -126,8 +134,11 @@ def check_broken_links(
     ok     = [r for r in results if not r.is_broken]
 
     return BrokenLinkReport(
+        total_found=total_found,
         total_checked=len(results),
         broken_count=len(broken),
+        internal_count=internal_unique,
+        external_count=external_unique,
         broken=sorted(broken, key=lambda r: r.url),
         ok=sorted(ok, key=lambda r: r.url),
         skipped=skipped,
@@ -222,8 +233,11 @@ def extract_all_links(html: str, base_url: str) -> list[dict]:
 
 def broken_link_report_to_dict(report: BrokenLinkReport) -> dict:
     return {
+        "total_found":   report.total_found,
         "total_checked": report.total_checked,
         "broken_count":  report.broken_count,
+        "internal_count": report.internal_count,
+        "external_count": report.external_count,
         "skipped":       report.skipped,
         "error_message": report.error_message,
         "broken": [

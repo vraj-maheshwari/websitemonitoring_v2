@@ -5,12 +5,11 @@
 {% block content %}
 <div class="container">
   <div class="page-header">
-    <h1>📊 Analytics Dashboard</h1>
-    <p>{{ site.display_name() }} - {{ site.url }}</p>
-  </div>
-
-  <div class="analytics-controls">
-    <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="btn btn-secondary">← Back to Site</a>
+    <div>
+      <a href="{{ url_for('web.site_detail', site_id=site.id) }}" class="back-link">Back to Site</a>
+      <h1>Analytics</h1>
+      <p>{{ site.display_name() }} - {{ site.url }}</p>
+    </div>
     <div class="time-range-selector">
       <a href="{{ url_for('web.site_analytics', site_id=site.id, days=7) }}" class="btn {% if days == 7 %}btn-primary{% else %}btn-outline{% endif %}">7 Days</a>
       <a href="{{ url_for('web.site_analytics', site_id=site.id, days=30) }}" class="btn {% if days == 30 %}btn-primary{% else %}btn-outline{% endif %}">30 Days</a>
@@ -19,9 +18,8 @@
   </div>
 
   <div class="analytics-grid">
-    <!-- Uptime Analytics -->
     <div class="analytics-card">
-      <h3>⏱️ Uptime Performance</h3>
+      <h3>Uptime Performance</h3>
       <div class="metric-large">
         <span class="metric-value">{{ "%.1f"|format(analytics.uptime_percentage) }}%</span>
         <span class="metric-label">Uptime</span>
@@ -47,7 +45,7 @@
           {% for incident in analytics.incidents %}
           <li>
             <strong>{{ incident.duration_minutes }}min</strong>
-            {{ incident.opened_at.strftime('%Y-%m-%d %H:%M') }}
+            {{ incident.opened_at | localtime | strftime('%Y-%m-%d %H:%M') }}
             {% if incident.root_cause %}- {{ incident.root_cause }}{% endif %}
           </li>
           {% endfor %}
@@ -56,9 +54,8 @@
       {% endif %}
     </div>
 
-    <!-- Response Time Analytics -->
     <div class="analytics-card">
-      <h3>⚡ Response Time</h3>
+      <h3>Response Time</h3>
       <div class="metric-large">
         <span class="metric-value">{{ "%.0f"|format(analytics.avg_response_time_ms) }}ms</span>
         <span class="metric-label">Average</span>
@@ -79,9 +76,8 @@
       </div>
     </div>
 
-    <!-- SSL Analytics -->
     <div class="analytics-card">
-      <h3>🔒 SSL Certificate</h3>
+      <h3>SSL Certificate</h3>
       {% if analytics.ssl_expiry_days is not none %}
       <div class="metric-large">
         <span class="metric-value">{{ analytics.ssl_expiry_days }}</span>
@@ -99,9 +95,8 @@
       </div>
     </div>
 
-    <!-- SEO Analytics -->
     <div class="analytics-card">
-      <h3>🔍 SEO Performance</h3>
+      <h3>SEO Performance</h3>
       <div class="metric-large">
         <span class="metric-value">{{ analytics.seo_score_avg or 0 }}</span>
         <span class="metric-label">Average Score</span>
@@ -122,10 +117,9 @@
       </div>
     </div>
 
-    <!-- Lighthouse CWV -->
     {% if analytics.lighthouse_data %}
     <div class="analytics-card full-width">
-      <h3>🚀 Core Web Vitals</h3>
+      <h3>Core Web Vitals</h3>
       <div class="cwv-grid">
         <div class="cwv-metric">
           <div class="cwv-value">{{ "%.1f"|format(analytics.lighthouse_data.lcp_avg) }}s</div>
@@ -146,13 +140,12 @@
     </div>
     {% endif %}
 
-    <!-- Daily Trends -->
     <div class="analytics-card full-width">
-      <h3>📈 Daily Trends (Last {{ days }} Days)</h3>
+      <h3>Daily Trends (Last {{ days }} Days)</h3>
       <div class="trends-chart">
         <div class="chart-placeholder">
-          <p>Chart visualization would go here</p>
-          <p>Showing uptime %, response times, and SEO scores over time</p>
+          <p>Chart visualization will appear here when trend series are available.</p>
+          <p>Showing uptime, response time, and SEO movement over time.</p>
         </div>
       </div>
     </div>

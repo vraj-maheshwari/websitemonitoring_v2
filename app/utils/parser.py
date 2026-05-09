@@ -6,8 +6,11 @@ Guarantees strict defaults and robust extraction.
 """
 
 import re
+import logging
 from collections import Counter
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 
 def parse_seo_intelligence(html: str, base_url: str = "") -> dict:
@@ -80,14 +83,30 @@ def parse_seo_intelligence(html: str, base_url: str = "") -> dict:
     links_with_anchor_text = 0
     domain = _get_domain(base_url)
     
+    logger.info("[PARSER] domain detected for %s: %s", base_url, domain)
     for l in hyperlinks:
         if l.get_text(strip=True):
             links_with_anchor_text += 1
-        href = l["href"]
-        if href.startswith("/") or (domain and domain in href):
+        href = (l.get("href") or "").strip()
+        if not href or href.startswith("#"):
+            continue
+
+        # Skip non-web schemes like mailto:, tel:, javascript:
+        if ":" in href and not href.lower().startswith("http"):
+            logger.debug("[PARSER] skipping non-web scheme: %s", href)
+            continue
+            
+        # Categorize
+        is_internal = href.startswith("/") or not href.startswith("http") or (domain and domain in href)
+        if is_internal:
             internal_count += 1
-        elif href.startswith("http"):
+            logger.debug("[PARSER] internal link found: %s", href)
+        else:
             external_count += 1
+            logger.debug("[PARSER] external link found: %s", href)
+
+    logger.info("[PARSER] summary for %s: internal=%d, external=%d, anchor_text_count=%d", 
+                base_url, internal_count, external_count, links_with_anchor_text)
 
     # 4. Mobile & Security Scans
     mixed_content_count = 0

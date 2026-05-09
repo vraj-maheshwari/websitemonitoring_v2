@@ -40,7 +40,7 @@ def check_uptime_alerts(site_url: str, status_code: int | None,
             body=(
                 f"Website: {site_url}\n"
                 f"Status:  {'No response' if status_code is None else status_code}\n"
-                f"Time:    {now_utc().isoformat()}"
+                f"Time:    {now_utc().isoformat()}Z"
             ),
         )
         return
@@ -54,7 +54,7 @@ def check_uptime_alerts(site_url: str, status_code: int | None,
                 f"Response time: {response_time:.2f}s "
                 f"(threshold: {Config.RESPONSE_TIME_THRESHOLD}s)\n"
                 f"Status code:   {status_code}\n"
-                f"Time:          {now_utc().isoformat()}"
+                f"Time:          {now_utc().isoformat()}Z"
             ),
         )
 
@@ -70,7 +70,7 @@ def check_ssl_alerts(site, is_valid: bool,
             body=(
                 f"Website: {site.url}\n"
                 f"Issue:   SSL certificate is invalid or could not be retrieved.\n"
-                f"Time:    {checked_at.isoformat()}"
+                f"Time:    {checked_at.isoformat()}Z"
             ),
         )
         _notify_site(site, None, "SSL_INVALID", checked_at, error_message="SSL Invalid")
@@ -90,7 +90,7 @@ def check_ssl_alerts(site, is_valid: bool,
                     f"Website:     {site.url}\n"
                     f"Expiry date: {expiry_date}\n"
                     f"Expired:     {-days_remaining} days ago\n"
-                    f"Time:        {checked_at.isoformat()}"
+                    f"Time:        {checked_at.isoformat()}Z"
                 ),
             )
         else:
@@ -101,7 +101,7 @@ def check_ssl_alerts(site, is_valid: bool,
                     f"Website:     {site.url}\n"
                     f"Expiry date: {expiry_date}\n"
                     f"Days left:   {days_remaining}\n"
-                    f"Time:        {checked_at.isoformat()}"
+                    f"Time:        {checked_at.isoformat()}Z"
                 ),
             )
         _notify_site(site, None, event_type, checked_at, days_remaining=days_remaining)
@@ -119,7 +119,7 @@ def check_seo_alerts(site, score: int, status: str, checked_at: datetime,
         _send_alert(
             level="WARNING",
             subject=f"[SEO REGRESSION] {site.url} dropped from {old_score} to {score}",
-            body=f"Website: {site.url}\nPrevious score: {old_score}\nCurrent score: {score}\nStatus: {status}\nTime: {checked_at.isoformat()}",
+            body=f"Website: {site.url}\nPrevious score: {old_score}\nCurrent score: {score}\nStatus: {status}\nTime: {checked_at.isoformat()}Z",
         )
         _notify_site(site, None, "SEO_REGRESSION", checked_at, seo_score=score)
 
@@ -144,6 +144,25 @@ def check_dns_alerts(site, result: dict, checked_at: datetime) -> None:
             added_ns=result.get("added_ns") or [],
             removed_ns=result.get("removed_ns") or [],
         )
+
+
+def check_security_alerts(site, grade: str, issues: list[str], malware: list[str], checked_at: datetime) -> None:
+    """Fire alerts for security regressions or malware detections."""
+    if malware:
+        _send_alert(
+            level="CRITICAL",
+            subject=f"[MALWARE DETECTED] {site.url}",
+            body=f"Website: {site.url}\nSignatures matched: {', '.join(malware)}\nTime: {checked_at.isoformat()}Z",
+        )
+        _notify_site(site, None, "SECURITY_MALWARE", checked_at, error_message=f"Malware signatures: {', '.join(malware)}")
+
+    if grade == "F":
+        _send_alert(
+            level="CRITICAL",
+            subject=f"[SECURITY CRITICAL] {site.url} failed audit",
+            body=f"Website: {site.url}\nGrade: {grade}\nKey issues: {', '.join(issues[:3])}\nTime: {checked_at.isoformat()}Z",
+        )
+        _notify_site(site, None, "SECURITY_CRITICAL", checked_at, error_message=f"Security grade F: {', '.join(issues[:3])}")
 
 
 def handle_uptime_transition(site, previous_status: str | None, current_status: str,
@@ -377,7 +396,7 @@ def _build_body(site, event_type: str, checked_at: datetime, status_code: int | 
         f"Site name: {site.display_name()}\n"
         f"URL: {site.url}\n"
         f"Event: {event_type}\n"
-        f"Timestamp: {checked_at.isoformat()}\n"
+        f"Timestamp: {checked_at.isoformat()}Z\n"
     )
 
     if event_type in ["DOWN", "RECOVERY"]:

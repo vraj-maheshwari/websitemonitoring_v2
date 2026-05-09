@@ -36,6 +36,10 @@
   </div>
   <div class="detail-header-right">
     <button id="edit-site-btn" class="btn btn-secondary btn-sm">✏ Edit Site</button>
+    <form method="post" action="{{ url_for('web.delete_site_web', site_id=site.id) }}" style="margin:0;" onsubmit="return confirm('Are you sure you want to delete this site? This action cannot be undone.')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button type="submit" class="btn btn-danger btn-sm">🗑 Delete Site</button>
+    </form>
     <div style="position:relative;">
       <button id="download-btn" class="btn btn-secondary btn-sm">⬇ Download Report ▼</button>
       <div id="download-menu" style="display:none;position:absolute;top:100%;right:0;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);z-index:10;min-width:120px;">
@@ -128,7 +132,7 @@
       {% endif %}
     </div>
     <div class="desc">
-      {% if site.last_uptime_check_at %}Last checked {{ site.last_uptime_check_at.strftime('%b %d, %H:%M') }}{% else %}Not checked yet{% endif %}
+      {% if site.last_uptime_check_at %}Last checked {{ site.last_uptime_check_at | localtime | strftime('%b %d, %H:%M') }}{% else %}Not checked yet{% endif %}
     </div>
   </div>
 
@@ -192,7 +196,7 @@
       {% endif %}
     </div>
     <div class="desc">
-      {% if site.last_dns_check_at %}Last checked {{ site.last_dns_check_at.strftime('%b %d, %H:%M') }}{% else %}Not checked yet{% endif %}
+      {% if site.last_dns_check_at %}Last checked {{ site.last_dns_check_at | localtime | strftime('%b %d, %H:%M') }}{% else %}Not checked yet{% endif %}
     </div>
   </div>
 
@@ -502,7 +506,7 @@
       </span>
       <span class="pill pill-blue">Real browser measurement</span>
       <span class="pill pill-gray">{{ report.lh_audit_method or 'playwright_perf' }}</span>
-      <span class="small muted">Audited {{ report.lh_audited_at.strftime('%b %d, %H:%M') }}</span>
+      <span class="small muted">Audited {{ report.lh_audited_at | localtime | strftime('%b %d, %H:%M') }}</span>
     </div>
     {% if report.lh_error %}
     <div class="cwv-disclaimer" style="margin-bottom:12px;">
@@ -891,7 +895,7 @@
       <tbody>
         {% for log in seo_logs %}
         <tr class="{% if not log.fetch_valid %}warning{% endif %}">
-          <td class="mono" style="font-size:.78rem;">{{ log.checked_at.strftime('%b %d %H:%M') }}</td>
+          <td class="mono" style="font-size:.78rem;">{{ log.checked_at | localtime | strftime('%b %d %H:%M') }}</td>
           <td>
             {% if log.fetch_valid and log.score is not none %}
               <span class="pill {% if log.score >= 80 %}pill-green{% elif log.score >= 60 %}pill-yellow{% else %}pill-red{% endif %}">{{ log.score }}</span>
@@ -981,11 +985,11 @@
       <div class="signal-row"><span>State</span><strong><span class="pill {{ pill_dns(site) }}">{{ site.dns_status or 'pending' }}</span></strong></div>
       <div class="signal-row"><span>Resolved</span><strong class="{% if site.dns_resolved %}val-green{% elif site.dns_status == 'failed' %}val-red{% else %}val-muted{% endif %}">{% if site.dns_resolved %}Yes{% elif site.dns_status == 'failed' %}No{% else %}&mdash;{% endif %}</strong></div>
       <div class="signal-row"><span>Lookup Time</span><strong>{% if site.dns_resolution_time_ms is not none %}{{ '%.0f'|format(site.dns_resolution_time_ms) }}ms{% else %}&mdash;{% endif %}</strong></div>
-      <div class="signal-row"><span>IP Addresses</span><strong class="truncate" style="max-width:180px;">{{ (site.dns_last_ips or []) | join(', ') or '&mdash;' }}</strong></div>
-      <div class="signal-row"><span>Nameservers</span><strong class="truncate" style="max-width:180px;">{{ (site.dns_last_ns or []) | join(', ') or '&mdash;' }}</strong></div>
+      <div class="signal-row"><span>IP Addresses</span><strong class="truncate" style="max-width:180px;">{{ (site.dns_last_ips or []) | join(', ') or '—' }}</strong></div>
+      <div class="signal-row"><span>Nameservers</span><strong class="truncate" style="max-width:180px;">{{ (site.dns_last_ns or []) | join(', ') or '—' }}</strong></div>
       <div class="signal-row"><span>IP Change</span><strong class="{% if site.dns_hijack_suspected %}val-red{% else %}val-green{% endif %}">{% if site.dns_hijack_suspected %}Detected{% else %}None{% endif %}</strong></div>
       <div class="signal-row"><span>NS Change</span><strong class="{% if site.dns_ns_changed %}val-yellow{% else %}val-green{% endif %}">{% if site.dns_ns_changed %}Detected{% else %}None{% endif %}</strong></div>
-      <div class="signal-row"><span>Last Checked</span><strong>{% if site.last_dns_check_at %}{{ site.last_dns_check_at.strftime('%b %d, %H:%M') }}{% else %}&mdash;{% endif %}</strong></div>
+      <div class="signal-row"><span>Last Checked</span><strong>{% if site.last_dns_check_at %}{{ site.last_dns_check_at | localtime | strftime('%b %d, %H:%M') }}{% else %}&mdash;{% endif %}</strong></div>
     </div>
     {% if site.dns_last_error %}
     <div style="margin-top:10px;padding:10px 12px;background:var(--red-bg);border:1px solid var(--red-border);border-radius:var(--radius-sm);font-size:.78rem;color:var(--red);">
@@ -997,7 +1001,7 @@
       {% for log in dns_logs[:5] %}
       <div class="uptime-row">
         <div class="dot {% if log.resolved %}dot-green{% else %}dot-red{% endif %}"></div>
-        <span class="time mono">{{ log.checked_at.strftime('%H:%M:%S') }}</span>
+        <span class="time mono">{{ log.checked_at | localtime | strftime('%H:%M:%S') }}</span>
         <span class="lat">{% if log.resolution_time_ms is not none %}{{ '%.0f'|format(log.resolution_time_ms) }}ms{% else %}&mdash;{% endif %}</span>
         <span class="pill {% if log.hijack_suspected %}pill-red{% elif log.ns_changed %}pill-yellow{% elif log.resolved %}pill-green{% else %}pill-red{% endif %}" style="font-size:.68rem;padding:2px 7px;">
           {% if log.hijack_suspected %}IP{% elif log.ns_changed %}NS{% elif log.resolved %}OK{% else %}FAIL{% endif %}
@@ -1023,9 +1027,9 @@
     <div class="signal-list">
       <div class="signal-row"><span>State</span><strong><span class="pill {{ pill_ssl(site.ssl_state) }}">{{ site.ssl_state }}</span></strong></div>
       <div class="signal-row"><span>Days Remaining</span><strong class="{{ ssl_cls(site.ssl_days_remaining) }}">{% if site.ssl_days_remaining is not none %}{{ site.ssl_days_remaining }} days{% else %}—{% endif %}</strong></div>
-      <div class="signal-row"><span>Expiry Date</span><strong>{% if site.ssl_expiry_date %}{{ site.ssl_expiry_date.strftime('%b %d, %Y') }}{% else %}—{% endif %}</strong></div>
+      <div class="signal-row"><span>Expiry Date</span><strong>{% if site.ssl_expiry_date %}{{ site.ssl_expiry_date | localtime | strftime('%b %d, %Y') }}{% else %}—{% endif %}</strong></div>
       <div class="signal-row"><span>Issuer</span><strong class="truncate" style="max-width:160px;">{{ site.ssl_issuer or '—' }}</strong></div>
-      <div class="signal-row"><span>Last Checked</span><strong>{% if site.last_ssl_check_at %}{{ site.last_ssl_check_at.strftime('%b %d, %H:%M') }}{% else %}—{% endif %}</strong></div>
+      <div class="signal-row"><span>Last Checked</span><strong>{% if site.last_ssl_check_at %}{{ site.last_ssl_check_at | localtime | strftime('%b %d, %H:%M') }}{% else %}—{% endif %}</strong></div>
     </div>
     <div style="margin-top:12px;">
       <form method="post" action="{{ url_for('web.run_check', site_id=site.id, check_type='ssl') }}" style="margin:0;">
@@ -1046,7 +1050,7 @@
       {% for log in uptime_logs[:10] %}
       <div class="uptime-row">
         <div class="dot {% if log.is_up %}dot-green{% else %}dot-red{% endif %}"></div>
-        <span class="time mono">{{ log.checked_at.strftime('%H:%M:%S') }}</span>
+        <span class="time mono">{{ log.checked_at | localtime | strftime('%H:%M:%S') }}</span>
         <span class="lat">{% if log.response_time %}{{ '%.0f'|format(log.response_time * 1000) }}ms{% else %}—{% endif %}</span>
         <span class="pill {% if log.is_up %}pill-green{% else %}pill-red{% endif %}" style="font-size:.68rem;padding:2px 7px;">{{ log.status_code or 'ERR' }}</span>
       </div>
@@ -1183,9 +1187,9 @@
       {% if incident.root_cause %}
       <span class="rca-badge">{{ incident.root_cause }}</span>
       {% endif %}
-      <span class="small muted">Opened {{ incident.opened_at.strftime('%b %d %H:%M') }}</span>
+      <span class="small muted">Opened {{ incident.opened_at | localtime | strftime('%b %d %H:%M') }}</span>
       {% if incident.resolved_at %}
-      <span class="small muted">· Resolved {{ incident.resolved_at.strftime('%b %d %H:%M') }}</span>
+      <span class="small muted">· Resolved {{ incident.resolved_at | localtime | strftime('%b %d %H:%M') }}</span>
       {% endif %}
     </div>
 

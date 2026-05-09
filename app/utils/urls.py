@@ -11,6 +11,9 @@ def normalize_url(url: str) -> tuple[str, str]:
 
     parsed = urlsplit(raw_url)
     scheme = parsed.scheme.lower() or "https"
+    if scheme not in ["http", "https"]:
+        raise ValueError("Only http and https protocols are supported")
+        
     hostname = (parsed.hostname or "").lower()
     if not hostname:
         raise ValueError("URL hostname is required")

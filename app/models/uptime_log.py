@@ -37,7 +37,7 @@ class UptimeLog(db.Model):
             "is_up":         self.is_up,
             "status":        self.status,
             "error_message": self.error_message,
-            "checked_at":    self.checked_at.isoformat(),
+            "checked_at":    self.checked_at.isoformat() + "Z",
         }
 
     def __repr__(self) -> str:

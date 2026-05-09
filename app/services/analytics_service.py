@@ -276,3 +276,73 @@ def _incident_count(site_id: int, cutoff) -> int:
         .filter(Incident.site_id == site_id, Incident.opened_at >= cutoff)
         .count()
     )
+
+
+def get_fleet_analytics(user_id: int, days: int = 7) -> dict:
+    """Aggregate analytics for all sites owned by a user."""
+    from app.models.site import Site
+    sites = Site.query.filter_by(user_id=user_id).all()
+    site_ids = [s.id for s in sites]
+    
+    if not site_ids:
+        return {
+            "uptime_trend": [],
+            "avg_latency": 0,
+            "total_incidents": 0,
+            "sites_count": 0
+        }
+
+    cutoff = now_utc() - timedelta(days=days)
+    cutoff_date = cutoff.date()
+
+    # Aggregate Uptime Trend (Fleet Avg)
+    # Group by date and calculate avg uptime % across all sites
+    trend_rows = (
+        db.session.query(
+            DailyUptimeSummary.summary_date,
+            func.avg(DailyUptimeSummary.uptime_percentage)
+        )
+        .filter(
+            DailyUptimeSummary.site_id.in_(site_ids),
+            DailyUptimeSummary.summary_date >= cutoff_date
+        )
+        .group_by(DailyUptimeSummary.summary_date)
+        .order_by(DailyUptimeSummary.summary_date.asc())
+        .all()
+    )
+    
+    uptime_trend = [
+        {"date": r[0].strftime("%d %b"), "up": round(r[1], 1)} 
+        for r in trend_rows
+    ]
+
+    # Avg Fleet Latency
+    avg_latency_s = (
+        db.session.query(func.avg(UptimeLog.response_time))
+        .filter(UptimeLog.site_id.in_(site_ids), UptimeLog.checked_at >= cutoff)
+        .scalar()
+    ) or 0.0
+
+    # Avg SSL Life
+    from app.models.ssl_log import SSLLog
+    avg_ssl_life = (
+        db.session.query(func.avg(SSLLog.days_remaining))
+        .filter(SSLLog.site_id.in_(site_ids), SSLLog.days_remaining > 0)
+        .scalar()
+    ) or 0
+
+    # Total Incidents
+    from app.models.incident import Incident
+    total_incidents = (
+        Incident.query
+        .filter(Incident.site_id.in_(site_ids), Incident.opened_at >= cutoff)
+        .count()
+    )
+
+    return {
+        "uptime_trend": uptime_trend,
+        "avg_latency": round(avg_latency_s * 1000),
+        "avg_ssl_life": round(avg_ssl_life),
+        "total_incidents": total_incidents,
+        "sites_count": len(site_ids)
+    }

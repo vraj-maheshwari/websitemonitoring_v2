@@ -35,11 +35,25 @@ celery.conf.update(
 )
 
 def acquire_check_lock(site_id: int, check_type: str) -> bool:
-    status_field = getattr(Site, f"{check_type}_status")
+    # Use the class attribute for the filter, not the instance attribute
+    status_attr = getattr(Site, f"{check_type}_status")
     started_name = f"{check_type}_started_at"
+    started_attr = getattr(Site, started_name)
+    
+    # Bug Fix: Lock Expiration
+    # If a check has been 'running' for more than 15 minutes, it likely crashed.
+    timeout_cutoff = now_utc() - timedelta(minutes=15)
+    
     updated = (
-        Site.query
-        .filter(Site.id == site_id, status_field != "running")
+        db.session.query(Site)
+        .filter(Site.id == site_id)
+        .filter(
+            (status_attr == "queued") |
+            (status_attr == "pending") |
+            (status_attr == "failed") |
+            (status_attr == "done") |
+            ((status_attr == "running") & (started_attr < timeout_cutoff))
+        )
         .update({
             f"{check_type}_status": "running",
             started_name: now_utc(),
@@ -258,6 +272,137 @@ def run_dns_check_task(site_id: int):
             if site.dns_status == "running":
                 site.dns_status = "failed"
             release_check_lock(site, "dns")
+    return "OK"
+
+@celery.task(name="tasks.run_full_audit", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def run_full_audit_task(site_id: int):
+    app = create_app()
+    with app.app_context():
+        site = db.session.get(Site, site_id)
+        if not site:
+            return "Site not found"
+        
+        # Run uptime check
+        if acquire_check_lock(site_id, "uptime"):
+            try:
+                run_uptime_service(site_id)
+            except Exception as e:
+                logger.warning("Uptime check failed for site %s: %s", site_id, e)
+                db.session.rollback()
+                site = db.session.get(Site, site_id)
+                if site:
+                    site.uptime_status = "failed"
+                    site.refresh_app_status()
+                    db.session.commit()
+            finally:
+                db.session.refresh(site)
+                if site and site.uptime_status == "running":
+                    site.uptime_status = "failed"
+                release_check_lock(site, "uptime")
+        
+        # Run SSL check
+        if acquire_check_lock(site_id, "ssl"):
+            try:
+                run_ssl_service(site_id)
+            except Exception as e:
+                logger.warning("SSL check failed for site %s: %s", site_id, e)
+                db.session.rollback()
+                site = db.session.get(Site, site_id)
+                if site:
+                    site.ssl_status = "failed"
+                    site.refresh_app_status()
+                    db.session.commit()
+            finally:
+                db.session.refresh(site)
+                if site and site.ssl_status == "running":
+                    site.ssl_status = "failed"
+                release_check_lock(site, "ssl")
+        
+        # Run SEO check
+        if acquire_check_lock(site_id, "seo"):
+            try:
+                run_seo_service(site_id)
+            except Exception as e:
+                logger.warning("SEO check failed for site %s: %s", site_id, e)
+                db.session.rollback()
+                site = db.session.get(Site, site_id)
+                if site:
+                    site.seo_status = "failed"
+                    site.refresh_app_status()
+                    db.session.commit()
+            finally:
+                db.session.refresh(site)
+                if site and site.seo_status == "running":
+                    site.seo_status = "failed"
+                release_check_lock(site, "seo")
+        
+        # Run security check
+        if acquire_check_lock(site_id, "security"):
+            try:
+                run_security_service(site_id)
+            except Exception as e:
+                logger.warning("Security check failed for site %s: %s", site_id, e)
+                db.session.rollback()
+                site = db.session.get(Site, site_id)
+                if site:
+                    site.security_status = "failed"
+                    site.refresh_app_status()
+                    db.session.commit()
+            finally:
+                db.session.refresh(site)
+                if site and site.security_status == "running":
+                    site.security_status = "failed"
+                release_check_lock(site, "security")
+        
+        # Run DNS check
+        if acquire_check_lock(site_id, "dns"):
+            try:
+                from app.services.dns_service import run_dns_check
+                checked_at = now_utc()
+                result = run_dns_check(site)
+                log = DNSLog(
+                    site_id=site.id,
+                    checked_at=checked_at,
+                    resolved=result.get("resolved"),
+                    resolution_time_ms=result.get("resolution_time_ms"),
+                    ip_addresses=result.get("ip_addresses") or [],
+                    nameservers=result.get("nameservers") or [],
+                    mx_records=result.get("mx_records") or [],
+                    hijack_suspected=result.get("hijack_suspected", False),
+                    new_ips=result.get("new_ips") or [],
+                    removed_ips=result.get("removed_ips") or [],
+                    ns_changed=result.get("ns_changed", False),
+                    added_ns=result.get("added_ns") or [],
+                    removed_ns=result.get("removed_ns") or [],
+                    error_message=result.get("error"),
+                )
+                db.session.add(log)
+                site.dns_resolved = result.get("resolved")
+                site.dns_resolution_time_ms = result.get("resolution_time_ms")
+                site.dns_last_ips = result.get("ip_addresses") or []
+                site.dns_last_ns = result.get("nameservers") or []
+                site.dns_hijack_suspected = result.get("hijack_suspected", False)
+                site.dns_ns_changed = result.get("ns_changed", False)
+                site.dns_last_error = result.get("error")
+                site.dns_status = "done" if result.get("resolved") else "failed"
+                schedule_next_run(site, CHECK_DNS, checked_at)
+                check_dns_alerts(site, result, checked_at)
+                site.refresh_app_status()
+                db.session.commit()
+            except Exception as e:
+                logger.warning("DNS check failed for site %s: %s", site_id, e)
+                db.session.rollback()
+                site = db.session.get(Site, site_id)
+                if site:
+                    site.dns_status = "failed"
+                    site.refresh_app_status()
+                    db.session.commit()
+            finally:
+                db.session.refresh(site)
+                if site and site.dns_status == "running":
+                    site.dns_status = "failed"
+                release_check_lock(site, "dns")
+        
     return "OK"
 
 @celery.task(name="tasks.dispatch_due_checks")

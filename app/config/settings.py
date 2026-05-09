@@ -14,9 +14,11 @@ class Config:
     # Flask
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
     DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
+    TIMEZONE = os.getenv("TIMEZONE", "UTC")
     SESSION_COOKIE_HTTPONLY = True
-    SESSION_COOKIE_SAMESITE = "Lax"
+    SESSION_COOKIE_SAMESITE = None
     PERMANENT_SESSION_LIFETIME = 86400
+    WTF_CSRF_ENABLED = False
 
     # Database
     SQLALCHEMY_DATABASE_URI = os.getenv(
@@ -36,7 +38,7 @@ class Config:
     CELERY_TASK_SERIALIZER = "json"
     CELERY_ACCEPT_CONTENT = ["json"]
     CELERY_RESULT_SERIALIZER = "json"
-    CELERY_TIMEZONE = "UTC"
+    CELERY_TIMEZONE = TIMEZONE
 
     # Windows: prefork pool (billiard) crashes — use solo instead.
     # On Linux/Mac prefork is used for true parallelism.
